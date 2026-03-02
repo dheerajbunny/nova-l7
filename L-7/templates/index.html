@@ -1,0 +1,642 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NOVA — Layer 7 Dialogue Manager</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: #0f1117;
+    font-family: 'Inter', sans-serif;
+    color: #e2e8f0;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* ── Header ── */
+  .header {
+    background: #1a1d27;
+    border-bottom: 1px solid #2d3148;
+    padding: 16px 32px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .header-left { display: flex; align-items: center; gap: 12px; }
+  .logo {
+    font-size: 22px; font-weight: 700; color: #fff;
+    letter-spacing: -0.5px;
+  }
+  .logo span { color: #6366f1; }
+  .badge {
+    font-size: 10px; font-weight: 600; letter-spacing: 0.08em;
+    padding: 3px 10px; border-radius: 20px;
+    text-transform: uppercase;
+  }
+  .badge-layer { background: rgba(99,102,241,0.15); color: #818cf8; border: 1px solid rgba(99,102,241,0.3); }
+  .badge-live  { background: rgba(34,197,94,0.15);  color: #4ade80;  border: 1px solid rgba(34,197,94,0.3); }
+
+  .session-indicator {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 12px; color: #64748b;
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .session-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: #ef4444;
+    transition: background 0.3s;
+  }
+  .session-dot.active { background: #4ade80; animation: pulse 2s infinite; }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  /* ── Main layout ── */
+  .main {
+    display: grid;
+    grid-template-columns: 1fr 380px;
+    gap: 0;
+    flex: 1;
+    overflow: hidden;
+    height: calc(100vh - 61px);
+  }
+
+  /* ── Chat area ── */
+  .chat-area {
+    display: flex;
+    flex-direction: column;
+    border-right: 1px solid #2d3148;
+  }
+
+  .messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 24px 28px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+  .messages::-webkit-scrollbar { width: 4px; }
+  .messages::-webkit-scrollbar-track { background: transparent; }
+  .messages::-webkit-scrollbar-thumb { background: #2d3148; border-radius: 2px; }
+
+  /* Message bubbles */
+  .msg { display: flex; gap: 12px; max-width: 85%; }
+  .msg.user { align-self: flex-end; flex-direction: row-reverse; }
+  .msg.nova { align-self: flex-start; }
+
+  .msg-avatar {
+    width: 32px; height: 32px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 14px; flex-shrink: 0;
+  }
+  .msg.user .msg-avatar { background: #6366f1; }
+  .msg.nova .msg-avatar { background: #1e293b; border: 1px solid #334155; }
+
+  .msg-content { display: flex; flex-direction: column; gap: 4px; }
+  .msg.user .msg-content { align-items: flex-end; }
+
+  .msg-bubble {
+    padding: 10px 14px; border-radius: 12px;
+    font-size: 14px; line-height: 1.5;
+    max-width: 100%;
+  }
+  .msg.user .msg-bubble {
+    background: #6366f1; color: #fff;
+    border-bottom-right-radius: 4px;
+  }
+  .msg.nova .msg-bubble {
+    background: #1e293b; color: #e2e8f0;
+    border: 1px solid #334155;
+    border-bottom-left-radius: 4px;
+  }
+
+  .msg-meta {
+    font-size: 10px; color: #475569;
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  /* State tag on nova message */
+  .msg-state {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-size: 10px; font-weight: 600; letter-spacing: 0.06em;
+    padding: 2px 8px; border-radius: 4px;
+    text-transform: uppercase; margin-top: 2px;
+  }
+
+  /* ── Input area ── */
+  .input-area {
+    padding: 16px 28px 20px;
+    border-top: 1px solid #2d3148;
+    background: #0f1117;
+  }
+
+  .input-row {
+    display: flex; gap: 10px; align-items: center;
+  }
+
+  .input-box {
+    flex: 1;
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 10px;
+    padding: 12px 16px;
+    font-size: 14px; color: #e2e8f0;
+    font-family: 'Inter', sans-serif;
+    outline: none;
+    transition: border-color 0.2s;
+  }
+  .input-box:focus { border-color: #6366f1; }
+  .input-box::placeholder { color: #475569; }
+
+  .send-btn {
+    background: #6366f1; color: #fff;
+    border: none; border-radius: 10px;
+    padding: 12px 20px; font-size: 14px; font-weight: 600;
+    cursor: pointer; transition: background 0.2s;
+    font-family: 'Inter', sans-serif;
+    white-space: nowrap;
+  }
+  .send-btn:hover { background: #4f46e5; }
+  .send-btn:active { transform: scale(0.98); }
+
+  .quick-cmds {
+    display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px;
+  }
+  .quick-btn {
+    background: #1e293b; border: 1px solid #334155;
+    border-radius: 6px; padding: 5px 10px;
+    font-size: 11px; color: #94a3b8; cursor: pointer;
+    transition: all 0.15s; font-family: 'Inter', sans-serif;
+  }
+  .quick-btn:hover { border-color: #6366f1; color: #a5b4fc; }
+
+  /* ── Side panel ── */
+  .side-panel {
+    display: flex; flex-direction: column;
+    background: #0f1117; overflow-y: auto;
+    padding: 20px;
+    gap: 16px;
+  }
+  .side-panel::-webkit-scrollbar { width: 4px; }
+  .side-panel::-webkit-scrollbar-thumb { background: #2d3148; border-radius: 2px; }
+
+  .panel-section {
+    background: #1a1d27;
+    border: 1px solid #2d3148;
+    border-radius: 12px;
+    overflow: hidden;
+  }
+
+  .panel-header {
+    padding: 10px 14px;
+    border-bottom: 1px solid #2d3148;
+    font-size: 10px; font-weight: 600;
+    letter-spacing: 0.12em; text-transform: uppercase;
+    color: #64748b;
+    display: flex; align-items: center; gap: 6px;
+  }
+
+  .panel-body { padding: 14px; }
+
+  /* FSM state display */
+  .fsm-state {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 20px; font-weight: 700;
+    text-align: center; padding: 12px;
+    border-radius: 8px; letter-spacing: 0.05em;
+    transition: all 0.3s;
+  }
+
+  /* Intent display */
+  .intent-badge {
+    display: flex; align-items: center; gap: 8px;
+    padding: 10px 12px; border-radius: 8px;
+    font-size: 13px; font-weight: 600;
+    margin-bottom: 8px;
+    transition: all 0.3s;
+  }
+  .intent-icon { font-size: 18px; }
+
+  /* Routing display */
+  .routing-text {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px; color: #94a3b8;
+    line-height: 1.6; padding: 10px 12px;
+    background: #0f1117; border-radius: 6px;
+  }
+
+  /* Entities */
+  .entity-row {
+    display: flex; justify-content: space-between;
+    align-items: center; padding: 6px 0;
+    border-bottom: 1px solid #2d3148; font-size: 12px;
+  }
+  .entity-row:last-child { border-bottom: none; }
+  .entity-key { color: #64748b; font-family: 'JetBrains Mono', monospace; }
+  .entity-val { color: #a5b4fc; font-weight: 500; }
+
+  /* Security layer */
+  .security-item {
+    display: flex; align-items: center; gap: 8px;
+    padding: 7px 0; font-size: 12px;
+    border-bottom: 1px solid #2d3148;
+  }
+  .security-item:last-child { border-bottom: none; }
+  .security-icon { font-size: 14px; width: 20px; text-align: center; }
+  .security-label { color: #94a3b8; flex: 1; }
+  .security-status { font-size: 10px; font-weight: 600; padding: 2px 7px; border-radius: 4px; }
+  .status-ok  { background: rgba(34,197,94,0.15); color: #4ade80; }
+  .status-pending { background: rgba(251,191,36,0.15); color: #fbbf24; }
+  .status-fail { background: rgba(239,68,68,0.15); color: #f87171; }
+
+  /* OTP display */
+  .otp-display {
+    display: flex; gap: 8px; justify-content: center;
+    padding: 12px 0;
+  }
+  .otp-digit {
+    width: 44px; height: 52px;
+    background: #0f1117; border: 2px solid #6366f1;
+    border-radius: 8px; display: flex; align-items: center;
+    justify-content: center; font-size: 22px; font-weight: 700;
+    font-family: 'JetBrains Mono', monospace; color: #818cf8;
+    transition: all 0.3s;
+  }
+  .otp-hidden { border-color: #334155; color: #334155; }
+
+  /* Color themes */
+  .state-idle     { background: rgba(30,41,59,0.8); color: #94a3b8; }
+  .state-verify   { background: rgba(251,191,36,0.1); color: #fbbf24; border: 1px solid rgba(251,191,36,0.3); }
+  .state-processing { background: rgba(99,102,241,0.1); color: #818cf8; border: 1px solid rgba(99,102,241,0.3); }
+  .state-slot     { background: rgba(251,146,60,0.1); color: #fb923c; border: 1px solid rgba(251,146,60,0.3); }
+  .state-confirm  { background: rgba(251,191,36,0.1); color: #fbbf24; border: 1px solid rgba(251,191,36,0.3); }
+  .state-otp      { background: rgba(168,85,247,0.1); color: #c084fc; border: 1px solid rgba(168,85,247,0.3); }
+
+  .intent-vehicle  { background: rgba(56,189,248,0.1); color: #38bdf8; }
+  .intent-navigation { background: rgba(52,211,153,0.1); color: #34d399; }
+  .intent-media    { background: rgba(168,85,247,0.1); color: #c084fc; }
+  .intent-payment  { background: rgba(251,146,60,0.1); color: #fb923c; }
+  .intent-question { background: rgba(99,102,241,0.1); color: #818cf8; }
+  .intent-stop     { background: rgba(239,68,68,0.1); color: #f87171; }
+  .intent-communication { background: rgba(34,197,94,0.1); color: #4ade80; }
+  .intent-unknown  { background: rgba(100,116,139,0.1); color: #94a3b8; }
+
+  /* Welcome message */
+  .welcome {
+    text-align: center; padding: 40px 20px;
+    color: #475569;
+  }
+  .welcome h2 { font-size: 18px; color: #64748b; margin-bottom: 8px; }
+  .welcome p { font-size: 13px; line-height: 1.6; }
+
+  /* Empty state for panel */
+  .empty-state {
+    text-align: center; padding: 16px;
+    color: #475569; font-size: 12px;
+  }
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<div class="header">
+  <div class="header-left">
+    <div class="logo"><span>NOVA</span> Voice AI</div>
+    <div class="badge badge-layer">Layer 7</div>
+    <div class="badge badge-live">Live Demo</div>
+  </div>
+  <div class="session-indicator">
+    <div class="session-dot" id="sessionDot"></div>
+    <span id="sessionLabel">No session</span>
+  </div>
+</div>
+
+<!-- Main -->
+<div class="main">
+
+  <!-- Chat -->
+  <div class="chat-area">
+    <div class="messages" id="messages">
+      <div class="welcome">
+        <h2>👋 NOVA Layer 7 — Dialogue Manager</h2>
+        <p>Type any voice command below to see how Layer 7 classifies,<br>routes, and responds to it in real time.</p>
+      </div>
+    </div>
+
+    <div class="input-area">
+      <div class="input-row">
+        <input
+          type="text"
+          class="input-box"
+          id="inputBox"
+          placeholder="Type a command... (e.g. turn on AC, navigate to airport, order coffee)"
+          autocomplete="off"
+        />
+        <button class="send-btn" onclick="sendMessage()">Send →</button>
+      </div>
+      <div class="quick-cmds">
+        <button class="quick-btn" onclick="quickSend('verify me')">🔐 Verify me</button>
+        <button class="quick-btn" onclick="quickSend('turn on AC')">❄️ Turn on AC</button>
+        <button class="quick-btn" onclick="quickSend('navigate to airport')">🗺️ Navigate</button>
+        <button class="quick-btn" onclick="quickSend('navigate to')">🧩 Slot fill</button>
+        <button class="quick-btn" onclick="quickSend('play relaxing music')">🎵 Play music</button>
+        <button class="quick-btn" onclick="quickSend('order a coffee')">☕ Order coffee</button>
+        <button class="quick-btn" onclick="quickSend('call mom')">📞 Call mom</button>
+        <button class="quick-btn" onclick="quickSend('what is the weather')">💬 Ask question</button>
+        <button class="quick-btn" onclick="quickSend('stop')">⛔ Stop</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Side panel -->
+  <div class="side-panel">
+
+    <!-- FSM State -->
+    <div class="panel-section">
+      <div class="panel-header">⚙️ FSM State</div>
+      <div class="panel-body">
+        <div class="fsm-state state-idle" id="fsmState">IDLE</div>
+      </div>
+    </div>
+
+    <!-- Intent -->
+    <div class="panel-section">
+      <div class="panel-header">🏷️ Intent Classified</div>
+      <div class="panel-body">
+        <div class="intent-badge intent-unknown" id="intentBadge">
+          <span class="intent-icon">—</span>
+          <span id="intentText">Waiting for input</span>
+        </div>
+        <div style="font-size:11px;color:#475569;font-family:'JetBrains Mono',monospace;">
+          Confidence: <span id="confidenceText">—</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Routing -->
+    <div class="panel-section">
+      <div class="panel-header">🔀 Routing Decision</div>
+      <div class="panel-body">
+        <div class="routing-text" id="routingText">No routing yet</div>
+      </div>
+    </div>
+
+    <!-- Entities -->
+    <div class="panel-section">
+      <div class="panel-header">📦 Extracted Entities</div>
+      <div class="panel-body" id="entitiesPanel">
+        <div class="empty-state">No entities yet</div>
+      </div>
+    </div>
+
+    <!-- OTP -->
+    <div class="panel-section" id="otpSection" style="display:none">
+      <div class="panel-header">🔊 Voice OTP</div>
+      <div class="panel-body">
+        <div style="font-size:11px;color:#94a3b8;margin-bottom:8px;text-align:center;">Nova speaks this code — driver must repeat it</div>
+        <div class="otp-display" id="otpDisplay"></div>
+        <div style="font-size:11px;color:#475569;text-align:center;margin-top:8px;">Unique per transaction — changes every time</div>
+      </div>
+    </div>
+
+    <!-- Security Stack -->
+    <div class="panel-section">
+      <div class="panel-header">🔐 Security Stack</div>
+      <div class="panel-body">
+        <div class="security-item">
+          <span class="security-icon">🎙️</span>
+          <span class="security-label">Voice biometric</span>
+          <span class="security-status" id="secVoice" style="background:rgba(100,116,139,0.15);color:#64748b">—</span>
+        </div>
+        <div class="security-item">
+          <span class="security-icon">🔑</span>
+          <span class="security-label">Session token</span>
+          <span class="security-status" id="secSession" style="background:rgba(100,116,139,0.15);color:#64748b">—</span>
+        </div>
+        <div class="security-item">
+          <span class="security-icon">✅</span>
+          <span class="security-label">Confirm pending</span>
+          <span class="security-status" id="secConfirm" style="background:rgba(100,116,139,0.15);color:#64748b">—</span>
+        </div>
+        <div class="security-item">
+          <span class="security-icon">🔢</span>
+          <span class="security-label">Voice OTP</span>
+          <span class="security-status" id="secOtp" style="background:rgba(100,116,139,0.15);color:#64748b">—</span>
+        </div>
+        <div class="security-item">
+          <span class="security-icon">💳</span>
+          <span class="security-label">Payment signed</span>
+          <span class="security-status" id="secPayment" style="background:rgba(100,116,139,0.15);color:#64748b">—</span>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+  const INTENT_CONFIG = {
+    vehicle_control:  { icon: "🚗", label: "Vehicle Control",  cls: "intent-vehicle" },
+    navigation:       { icon: "🗺️", label: "Navigation",       cls: "intent-navigation" },
+    media:            { icon: "🎵", label: "Media",            cls: "intent-media" },
+    payment:          { icon: "💳", label: "Payment",          cls: "intent-payment" },
+    general_question: { icon: "💬", label: "General Question", cls: "intent-question" },
+    stop:             { icon: "⛔", label: "Stop / Cancel",    cls: "intent-stop" },
+    communication:    { icon: "📞", label: "Communication",    cls: "intent-communication" },
+    unknown:          { icon: "❓", label: "Unknown",          cls: "intent-unknown" },
+  };
+
+  const STATE_CONFIG = {
+    IDLE:            { cls: "state-idle",       label: "IDLE" },
+    VERIFY:          { cls: "state-verify",     label: "VERIFY" },
+    PROCESSING:      { cls: "state-processing", label: "PROCESSING" },
+    SLOT_FILL:       { cls: "state-slot",       label: "SLOT FILL" },
+    CONFIRM_PENDING: { cls: "state-confirm",    label: "CONFIRM PENDING" },
+    OTP_PENDING:     { cls: "state-otp",        label: "OTP PENDING" },
+  };
+
+  function getTime() {
+    return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+
+  function addMessage(role, text, response) {
+    const messages = document.getElementById('messages');
+
+    const msg = document.createElement('div');
+    msg.className = `msg ${role}`;
+
+    const avatar = document.createElement('div');
+    avatar.className = 'msg-avatar';
+    avatar.textContent = role === 'user' ? '👤' : '🤖';
+
+    const content = document.createElement('div');
+    content.className = 'msg-content';
+
+    const bubble = document.createElement('div');
+    bubble.className = 'msg-bubble';
+    bubble.textContent = text;
+
+    const meta = document.createElement('div');
+    meta.className = 'msg-meta';
+    meta.textContent = getTime();
+
+    content.appendChild(bubble);
+
+    // Add state tag for nova messages
+    if (role === 'nova' && response) {
+      const stateTag = document.createElement('div');
+      const stateConf = STATE_CONFIG[response.fsm_state] || STATE_CONFIG['IDLE'];
+      stateTag.className = `msg-state ${stateConf.cls}`;
+      stateTag.textContent = stateConf.label;
+      content.appendChild(stateTag);
+    }
+
+    content.appendChild(meta);
+    msg.appendChild(avatar);
+    msg.appendChild(content);
+    messages.appendChild(msg);
+    messages.scrollTop = messages.scrollHeight;
+  }
+
+  function updatePanel(response) {
+    // FSM State
+    const fsmEl = document.getElementById('fsmState');
+    const stateConf = STATE_CONFIG[response.fsm_state] || STATE_CONFIG['IDLE'];
+    fsmEl.className = `fsm-state ${stateConf.cls}`;
+    fsmEl.textContent = stateConf.label;
+
+    // Intent
+    const intentConf = INTENT_CONFIG[response.intent] || INTENT_CONFIG['unknown'];
+    const intentBadge = document.getElementById('intentBadge');
+    intentBadge.className = `intent-badge ${intentConf.cls}`;
+    intentBadge.innerHTML = `<span class="intent-icon">${intentConf.icon}</span><span>${intentConf.label}</span>`;
+    document.getElementById('intentText');
+    document.getElementById('confidenceText').textContent = response.confidence || '—';
+
+    // Routing
+    document.getElementById('routingText').textContent = response.routing || '—';
+
+    // Entities
+    const entPanel = document.getElementById('entitiesPanel');
+    const entities = response.entities || {};
+    if (Object.keys(entities).length === 0) {
+      entPanel.innerHTML = '<div class="empty-state">No entities extracted</div>';
+    } else {
+      entPanel.innerHTML = Object.entries(entities).map(([k, v]) => `
+        <div class="entity-row">
+          <span class="entity-key">${k}</span>
+          <span class="entity-val">${v || '—'}</span>
+        </div>
+      `).join('');
+    }
+
+    // OTP
+    const otpSection = document.getElementById('otpSection');
+    if (response.otp && response.otp.length > 0) {
+      otpSection.style.display = 'block';
+      const otpDisplay = document.getElementById('otpDisplay');
+      otpDisplay.innerHTML = response.otp.map(d => `
+        <div class="otp-digit">${d}</div>
+      `).join('');
+      updateSecurity('secOtp', 'ACTIVE', 'pending');
+    } else if (response.fsm_state === 'IDLE') {
+      otpSection.style.display = 'none';
+    }
+
+    // Session indicator
+    const dot = document.getElementById('sessionDot');
+    const label = document.getElementById('sessionLabel');
+    if (response.session_started || response.fsm_state !== 'VERIFY') {
+      if (response.intent !== 'stop' && response.fsm_state === 'IDLE') {
+        dot.classList.add('active');
+        label.textContent = 'Session active';
+      }
+    }
+    if (response.fsm_state === 'VERIFY') {
+      dot.classList.remove('active');
+      label.textContent = 'Verify required';
+    }
+
+    // Security stack updates
+    if (response.verify_message) {
+      updateSecurity('secVoice', 'PASS', 'ok');
+      updateSecurity('secSession', 'ACTIVE', 'ok');
+    }
+    if (response.fsm_state === 'CONFIRM_PENDING') {
+      updateSecurity('secConfirm', 'WAITING', 'pending');
+    }
+    if (response.action === 'payment_authorized') {
+      updateSecurity('secConfirm', 'PASS', 'ok');
+      updateSecurity('secOtp', 'PASS', 'ok');
+      updateSecurity('secPayment', 'SIGNED', 'ok');
+    }
+    if (response.action === 'payment_denied') {
+      updateSecurity('secOtp', 'FAIL', 'fail');
+    }
+    if (response.intent === 'stop') {
+      // Reset security panel
+      ['secVoice','secSession','secConfirm','secOtp','secPayment'].forEach(id => {
+        updateSecurity(id, '—', 'none');
+      });
+      dot.classList.remove('active');
+      label.textContent = 'No session';
+    }
+  }
+
+  function updateSecurity(id, text, type) {
+    const el = document.getElementById(id);
+    el.textContent = text;
+    el.className = 'security-status';
+    if (type === 'ok')      { el.style.background = 'rgba(34,197,94,0.15)';  el.style.color = '#4ade80'; }
+    if (type === 'pending') { el.style.background = 'rgba(251,191,36,0.15)'; el.style.color = '#fbbf24'; }
+    if (type === 'fail')    { el.style.background = 'rgba(239,68,68,0.15)';  el.style.color = '#f87171'; }
+    if (type === 'none')    { el.style.background = 'rgba(100,116,139,0.15)'; el.style.color = '#64748b'; }
+  }
+
+  async function sendMessage() {
+    const inputBox = document.getElementById('inputBox');
+    const text = inputBox.value.trim();
+    if (!text) return;
+
+    inputBox.value = '';
+    addMessage('user', text, null);
+
+    try {
+      const res = await fetch('/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: text })
+      });
+      const data = await res.json();
+
+      // Show verify message first if present
+      if (data.verify_message) {
+        addMessage('nova', data.verify_message, { fsm_state: 'PROCESSING', intent: data.intent });
+      }
+
+      addMessage('nova', data.nova_says, data);
+      updatePanel(data);
+
+    } catch (err) {
+      addMessage('nova', 'Error connecting to server. Is the server running?', null);
+    }
+  }
+
+  function quickSend(text) {
+    document.getElementById('inputBox').value = text;
+    sendMessage();
+  }
+
+  // Enter key to send
+  document.getElementById('inputBox').addEventListener('keydown', e => {
+    if (e.key === 'Enter') sendMessage();
+  });
+</script>
+</body>
+</html>
