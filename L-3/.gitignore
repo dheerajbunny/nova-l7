@@ -1,0 +1,28 @@
+# ── Personal biometric data — NEVER push these ────────────────────────────────
+data/
+*.enc
+*.key
+*.secret
+
+# ── Large pretrained model files — too large for GitHub ───────────────────────
+pretrained_models/
+*.pt
+*.pth
+*.bin
+*.onnx
+*.pb
+
+# ── Python cache ──────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# ── Virtual environment ────────────────────────────────────────────────────────
+venv/
+env/
+.env
+
+# ── OS files ──────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db

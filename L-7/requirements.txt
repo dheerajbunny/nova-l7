@@ -1,4 +1,16 @@
 fastapi
 uvicorn
-scikit-learn
 jinja2
+pydantic
+scikit-learn
+speechbrain==1.0.2
+deepface
+opencv-python
+cryptography
+python-jose
+pyaudio
+soundfile
+numpy<2
+huggingface-hub==0.23.4
+torch
+websockets
