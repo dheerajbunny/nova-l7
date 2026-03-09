@@ -135,25 +135,9 @@ def run_voice_otp(driver_id: str, verbose: bool = True) -> dict:
 #  MAIN AUTH FLOW
 # ══════════════════════════════════════════════════════════════════════════════
 
-def authenticate(driver_id: str, verbose: bool = True) -> Optional[str]:
+def authenticate(driver_id: str, verbose: bool = True, audio_buffer=None) -> Optional[str]:
     """
     Full 3-level authentication flow.
-
-    Level 1: Voice biometric (up to 3 attempts)
-    Level 2: PIN fallback (1 attempt)
-    Level 3: Face ID fallback (1 attempt)
-    Lockout: All 3 levels failed
-
-    Returns:
-        session token (str) if any level passes
-        None if all levels fail (lockout)
-
-    Usage (from Layer 7):
-        token = authenticate("driver1")
-        if token:
-            proceed()
-        else:
-            lockout()
     """
     if verbose:
         print(f"\n{'═'*55}")
@@ -169,7 +153,7 @@ def authenticate(driver_id: str, verbose: bool = True) -> Optional[str]:
         if verbose:
             print(f"\n  Attempt {attempt}/{MAX_VOICE_RETRIES}...")
 
-        result = verify_voice(driver_id, verbose=verbose)
+        result = verify_voice(driver_id, verbose=verbose, audio_buffer=audio_buffer)
 
         if result.get("error"):
             if verbose:
@@ -187,6 +171,14 @@ def authenticate(driver_id: str, verbose: bool = True) -> Optional[str]:
         if result["passed"]:
             token = _create_and_register_token(driver_id, "voice", verbose)
             return token
+            
+        if audio_buffer is not None:
+            # If using a pre-recorded buffer from the WebSocket, don't retry with the same buffer
+            break
+
+    if audio_buffer is not None:
+        if verbose: print("  [fallback] Skipping interactive PIN/Face fallbacks because we are running in streaming mode.")
+        return None
 
     if verbose:
         print(f"\n  ⚠️  Voice failed {MAX_VOICE_RETRIES} times. Moving to PIN fallback...")

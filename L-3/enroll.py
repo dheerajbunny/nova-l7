@@ -120,7 +120,7 @@ def extract_fingerprint(wav_path: Path) -> np.ndarray:
         embedding = model.encode_batch(waveform)
 
     # Returns shape (1, 1, 192) — flatten to (192,)
-    fingerprint = embedding.squeeze().numpy()
+    fingerprint = embedding.squeeze().cpu().numpy()
     return fingerprint
 
 
@@ -189,11 +189,18 @@ def enroll_voice(driver_id: str, num_samples: int = 5) -> bool:
 #  STEP 4 — ENROLL FACE
 # ══════════════════════════════════════════════════════════════════════════════
 
-def enroll_face(driver_id: str) -> bool:
+def enroll_face(driver_id: str, interactive: bool = True) -> bool:
     """
     Captures a face photo from webcam, extracts face embedding,
     encrypts and saves it.
     """
+    import os
+    os.environ['CUDA_VISIBLE_DEVICES'] = '-1'  # Force DeepFace/TensorFlow to use CPU
+    try:
+        import tensorflow as tf
+        tf.config.set_visible_devices([], 'GPU')
+    except Exception:
+        pass
     import cv2
 
     print(f"\n{'='*55}")
@@ -202,7 +209,8 @@ def enroll_face(driver_id: str) -> bool:
     print(f"  We will capture your face using the webcam.")
     print(f"{'='*55}\n")
 
-    input("  Press ENTER to activate webcam. Look directly at camera...")
+    if interactive:
+        input("  Press ENTER to activate webcam. Look directly at camera...")
 
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():

@@ -50,6 +50,8 @@ WORD_TO_DIGIT = {
 }
 
 
+import re
+
 def normalize_pin(spoken_text: str) -> str:
     """
     Convert spoken PIN to digit string.
@@ -59,11 +61,12 @@ def normalize_pin(spoken_text: str) -> str:
       "4 7 8 2"               → "4782"
       "4782"                  → "4782"
       "four 7 eight 2"        → "4782"
+      "1, 2, 3, 4... 1, 2, 3, 4..." -> "1234"
     """
     spoken_text = spoken_text.lower().strip()
 
-    # Remove punctuation
-    spoken_text = spoken_text.replace(",", " ").replace(".", " ")
+    # Remove all punctuation including commas and ellipses
+    spoken_text = re.sub(r'[^\w\s]', ' ', spoken_text)
 
     result = ""
     tokens = spoken_text.split()
@@ -71,12 +74,12 @@ def normalize_pin(spoken_text: str) -> str:
     for token in tokens:
         if token in WORD_TO_DIGIT:
             result += WORD_TO_DIGIT[token]
-        elif token.isdigit() and len(token) == 1:
+        elif token.isdigit():
             result += token
-        elif token.isdigit() and len(token) == 4:
-            # "4782" spoken as one token
-            result = token
-            break
+            
+        if len(result) >= 4:
+            # We found our 4 digits, stop processing repeats
+            return result[:4]
 
     return result
 

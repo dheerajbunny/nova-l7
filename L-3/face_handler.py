@@ -93,6 +93,14 @@ def extract_face_embedding(image_path: Path, verbose: bool = True) -> np.ndarray
     Extract face embedding from an image using DeepFace Facenet model.
     Returns numpy array of shape (128,), or None if no face detected.
     """
+    import os
+    os.environ['CUDA_VISIBLE_DEVICES'] = '-1'  # Force DeepFace/TensorFlow to use CPU
+    try:
+        import tensorflow as tf
+        tf.config.set_visible_devices([], 'GPU')
+    except Exception:
+        pass
+        
     from deepface import DeepFace
 
     try:

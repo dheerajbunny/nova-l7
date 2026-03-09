@@ -119,7 +119,7 @@ def extract_live_fingerprint(wav_path: Path) -> np.ndarray:
     with torch.no_grad():
         embedding = model.encode_batch(waveform)
 
-    fingerprint = embedding.squeeze().numpy()
+    fingerprint = embedding.squeeze().cpu().numpy()
 
     # Normalize for cosine similarity
     fingerprint = fingerprint / np.linalg.norm(fingerprint)
@@ -149,23 +149,10 @@ def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
 
 def verify_voice(driver_id: str,
                  threshold: float = THRESHOLD_NORMAL,
-                 verbose: bool = True) -> dict:
+                 verbose: bool = True,
+                 audio_buffer: np.ndarray = None) -> dict:
     """
     Full voice verification for a driver.
-
-    Returns a dict:
-    {
-        "passed":    True/False,
-        "score":     0.0 - 1.0,
-        "driver_id": "driver1",
-        "threshold": 0.85,
-        "time_ms":   150
-    }
-
-    Usage:
-        result = verify_voice("driver1")
-        if result["passed"]:
-            print("Identity confirmed")
     """
     start_time = time.time()
 
@@ -181,12 +168,14 @@ def verify_voice(driver_id: str,
             "time_ms": 0
         }
 
-    if verbose:
-        print(f"  [verify] Recording voice... speak now (2.5 sec)")
-
-    # Record live audio
-    audio = record_live(duration=2.5)
-    wav_path = save_temp_wav(audio, f"{driver_id}_live")
+    if audio_buffer is not None:
+        if verbose: print(f"  [verify] Using provided audio buffer from pipeline")
+        wav_path = save_temp_wav(audio_buffer, f"{driver_id}_live")
+    else:
+        if verbose: print(f"  [verify] Recording voice... speak now (2.5 sec)")
+        # Record live audio
+        audio = record_live(duration=2.5)
+        wav_path = save_temp_wav(audio, f"{driver_id}_live")
 
     if verbose:
         print(f"  [verify] Extracting live fingerprint...")
@@ -231,14 +220,14 @@ def verify_voice(driver_id: str,
 #  PAYMENT VERIFICATION — STRICTER THRESHOLD
 # ══════════════════════════════════════════════════════════════════════════════
 
-def verify_for_payment(driver_id: str, verbose: bool = True) -> dict:
+def verify_for_payment(driver_id: str, verbose: bool = True, audio_buffer: np.ndarray = None) -> dict:
     """
     Same as verify_voice but with stricter threshold (0.92) for payments.
     Call this when driver wants to make a purchase.
     """
     if verbose:
         print(f"\n  [verify] Payment verification — stricter threshold ({THRESHOLD_PAYMENT})")
-    return verify_voice(driver_id, threshold=THRESHOLD_PAYMENT, verbose=verbose)
+    return verify_voice(driver_id, threshold=THRESHOLD_PAYMENT, verbose=verbose, audio_buffer=audio_buffer)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

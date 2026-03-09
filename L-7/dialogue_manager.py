@@ -31,7 +31,10 @@ sys.path.insert(0, os.path.abspath(L3_PATH))
 
 L3_AVAILABLE = False
 try:
-    from layer3_main import authenticate, check_session, authorize_payment
+    from layer3_main import check_session, authorize_payment, _create_and_register_token
+    from verify import verify_voice
+    from pin_handler import verify_pin
+    from face_handler import verify_face
     L3_AVAILABLE = True
     print("[Layer 7] Layer 3 connected — real voice verification active")
 except ImportError as e:
@@ -113,9 +116,10 @@ def build_response(
     verification_status: str = None,
     queued: bool = False,
     queue_position: int = None,
-    buffered_response: dict = None
+    buffered_response: dict = None,
+    **kwargs
 ) -> dict:
-    return {
+    response = {
         "nova_says":        message,
         "fsm_state":        state,
         "intent":           intent,
@@ -129,6 +133,8 @@ def build_response(
         "buffered_response":buffered_response,# next queued response if any
         "timestamp":        time.time()
     }
+    response.update(kwargs)
+    return response
 
 
 # ── Required slots ─────────────────────────────────────────────────────────────
@@ -198,10 +204,11 @@ def handle_media(entities: dict) -> dict:
 
 def handle_general_question(text: str, history: list) -> dict:
     return build_response(
-        message=f"Let me think about that... (LLM response streams here with {len(history)} turns of context)",
+        message=f"Let me think about that...",
         state="IDLE", intent="general_question",
-        routing="LLM via OpenRouter — Mistral-7B — full conversation context attached",
-        entities={}, action="llm_call"
+        routing="Local Qwen3.5 LLM with context",
+        entities={}, action="llm_call",
+        original_text=text
     )
 
 def handle_communication(entities: dict) -> dict:
@@ -226,7 +233,7 @@ def _log_command(driver_id: str, command: str, intent: str, is_verified: bool):
         return
     try:
         log_event(
-            event_type="COMMAND", driver_id=driver_id,
+            event_type="COMMAND", driver_id=driver_id, passed=is_verified,
             details={"command": command, "intent": intent, "is_verified": is_verified}
         )
     except Exception as e:
@@ -336,10 +343,10 @@ class DialogueManager:
         elapsed = time.time() - (self.state.session_start or 0)
         return elapsed < self.state.session_duration
 
-    def _run_layer3_auth(self) -> tuple:
+    def _run_layer3_auth(self, audio_buffer=None) -> tuple:
         if L3_AVAILABLE:
             print("[Layer 7] Calling Layer 3 authenticate()...")
-            token = authenticate(self._driver_id)
+            token = authenticate(self._driver_id, audio_buffer=audio_buffer)
             return (True, token) if token else (False, "Authentication failed")
         print("[Layer 7] Simulation mode — auto-passing verification")
         self.state.session_start = time.time()
@@ -406,16 +413,9 @@ class DialogueManager:
     # MAIN ENTRY POINT
     # ══════════════════════════════════════════════════════════════════════════
 
-    def process(self, user_input: str) -> dict:
+    def process(self, user_input: str, audio_buffer=None) -> dict:
         """
         Main entry point — call this for every user message.
-
-        BUFFER LOGIC:
-        - If Nova is currently speaking (is_speaking=True)
-          AND it's not an interrupt keyword
-          → save to buffer, return acknowledgment
-        - When Nova finishes speaking → call speaking_done()
-          → speaking_done() auto-processes next from buffer
         """
         user_input = user_input.strip()
         if not user_input:
@@ -443,9 +443,9 @@ class DialogueManager:
             return self._push_to_buffer(user_input)
 
         # ── Not speaking or is interrupt — process normally ───────────────────
-        return self._process_command(user_input)
+        return self._process_command(user_input, audio_buffer=audio_buffer)
 
-    def _process_command(self, user_input: str) -> dict:
+    def _process_command(self, user_input: str, audio_buffer=None) -> dict:
         """
         Internal — actually processes the command.
         Called directly when not speaking, or from speaking_done() for buffered commands.
@@ -467,7 +467,7 @@ class DialogueManager:
             _log_command(self._driver_id, user_input, "emergency",
                          self._is_session_valid())
             return self._store_response(build_response(
-                message="Emergency detected. Calling emergency services now. Alerting emergency contacts. Stay calm.",
+                message="Emergency detected. Automatically calling 911 and alerting your family members, Mom and Dad. Please stay calm.",
                 state="IDLE", intent="emergency",
                 routing="Emergency — absolute highest priority — buffer cleared",
                 action="emergency_call"
@@ -587,7 +587,13 @@ class DialogueManager:
             return self._store_response(self._handle_otp(user_input))
 
         if self.state.fsm_state == "VERIFY":
-            return self._store_response(self._handle_verify(user_input))
+            return self._store_response(self._handle_verify_voice(user_input, audio_buffer))
+
+        if self.state.fsm_state == "VERIFY_PIN":
+            return self._store_response(self._handle_verify_pin(user_input))
+
+        if self.state.fsm_state == "VERIFY_FACE":
+            return self._store_response(self._handle_verify_face(user_input))
 
         # ══════════════════════════════════════════════════════════════════════
         # NORMAL FLOW
@@ -665,31 +671,111 @@ class DialogueManager:
 
     # ── State handlers ─────────────────────────────────────────────────────────
 
-    def _handle_verify(self, user_input: str) -> dict:
+    def _handle_verify_voice(self, user_input: str, audio_buffer=None) -> dict:
         print(f"[Layer 7] Starting Layer 3 auth for: {self._driver_id}")
-        success, token_or_error = self._run_layer3_auth()
-
-        if success:
-            self._start_session(token_or_error)
+        
+        if L3_AVAILABLE and audio_buffer is not None:
+            # Try voice first
+            result = verify_voice(self._driver_id, verbose=True, audio_buffer=audio_buffer)
+            
+            if result.get("error") or not result["passed"]:
+                self.state.fsm_state = "VERIFY_PIN"
+                return build_response(
+                    message="Voice not recognized. Please say your PIN number.",
+                    state="VERIFY_PIN", intent="verify",
+                    routing="Layer 3 — voice failed, falling back to PIN",
+                    verification_status="needed"
+                )
+            
+            # Voice passed! Create token.
+            token = _create_and_register_token(self._driver_id, "voice", verbose=True)
+            self._start_session(token)
+            self.state.fsm_state = "IDLE"
+            
+            filled = IntentResult(
+                intent=self.state.current_intent, confidence=1.0,
+                entities=self.state.pending_entities, raw_text=user_input
+            )
+            response = self._route(filled)
+            response["verify_message"]      = "Voice recognized. Identity verified."
+            response["session_started"]     = True
+            response["verification_status"] = "passed"
+            return response
+            
+        elif not L3_AVAILABLE:
+            # Simulation
+            self.state.session_start = time.time()
+            self.state.session_valid = True
             self.state.fsm_state = "IDLE"
             filled = IntentResult(
                 intent=self.state.current_intent, confidence=1.0,
                 entities=self.state.pending_entities, raw_text=user_input
             )
             response = self._route(filled)
-            response["verify_message"]      = "Identity verified. Session active — 15 minutes."
+            response["verify_message"]      = "Identity verified (simulation)."
             response["session_started"]     = True
             response["verification_status"] = "passed"
             return response
-        else:
-            self.state.fsm_state    = "IDLE"
-            self.state.current_intent = None
-            return build_response(
-                message="Identity verification failed. Access denied. Please try again.",
-                state="IDLE", intent="verify",
-                routing="Layer 3 — all levels failed",
-                action="verification_failed", verification_status="failed"
+            
+        return build_response(
+            message="No audio buffer provided for verification.",
+            state="IDLE", intent="verify",
+            routing="Layer 3 — Missing audio buffer",
+            action="verification_failed", verification_status="failed"
+        )
+
+    def _handle_verify_pin(self, user_input: str) -> dict:
+        if L3_AVAILABLE:
+            result = verify_pin(self._driver_id, user_input, verbose=True)
+            if result.get("error") or not result["passed"]:
+                self.state.fsm_state = "VERIFY_FACE"
+                return build_response(
+                    message="PIN incorrect. Please look at the cabin camera for Face ID.",
+                    state="VERIFY_FACE", intent="verify",
+                    routing="Layer 3 — PIN failed, falling back to Face ID",
+                    verification_status="needed"
+                )
+                
+            token = _create_and_register_token(self._driver_id, "pin", verbose=True)
+            self._start_session(token)
+            self.state.fsm_state = "IDLE"
+            
+            filled = IntentResult(
+                intent=self.state.current_intent, confidence=1.0,
+                entities=self.state.pending_entities, raw_text=user_input
             )
+            response = self._route(filled)
+            response["verify_message"]      = "PIN accepted. Identity verified."
+            response["session_started"]     = True
+            response["verification_status"] = "passed"
+            return response
+            
+    def _handle_verify_face(self, user_input: str) -> dict:
+        if L3_AVAILABLE:
+            result = verify_face(self._driver_id, verbose=True)
+            if result.get("error") or not result["passed"]:
+                self.state.fsm_state = "IDLE"
+                self.state.current_intent = None
+                return build_response(
+                    message="Face ID failed. Identity verification failed. Access denied.",
+                    state="IDLE", intent="verify",
+                    routing="Layer 3 — all levels failed",
+                    action="verification_failed", verification_status="failed"
+                )
+                
+            token = _create_and_register_token(self._driver_id, "face", verbose=True)
+            self._start_session(token)
+            self.state.fsm_state = "IDLE"
+            
+            filled = IntentResult(
+                intent=self.state.current_intent, confidence=1.0,
+                entities=self.state.pending_entities, raw_text=user_input
+            )
+            response = self._route(filled)
+            response["verify_message"]      = "Face recognized. Identity verified."
+            response["session_started"]     = True
+            response["verification_status"] = "passed"
+            return response
 
     def _handle_slot_fill(self, user_input: str) -> dict:
         self.state.slot_attempt += 1
