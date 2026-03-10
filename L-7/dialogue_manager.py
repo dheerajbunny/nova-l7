@@ -1,38 +1,16 @@
 """
 NOVA Layer 7 - Dialogue Manager
-The brain that decides what to do with each intent.
 
-ARCHITECTURE (matches L-3 diagram):
-─────────────────────────────────────────────────────────────────
-Wake word → Voice biometric (L3)
-  PASS → Session token (15 min) → Ready for commands
-  FAIL x2 → PIN fallback (L2)
-    PASS → Session token
-    FAIL → Face ID fallback (L3)
-      PASS → Session token
-      FAIL → Full lockout
-
-Payment request → Session token valid?
-  YES → Voice OTP → Location check → Payment authorized
-  NO (expired) → Re-verify voice (0.92 threshold)
-    PASS → Voice OTP → Location check → Payment authorized
-    FAIL → Spoken PIN for payment
-      PASS → Payment authorized
-      FAIL → Payment denied
-
-Voice OTP fail → PIN fallback for payment → deny if fail
-─────────────────────────────────────────────────────────────────
-
-FEATURES:
-- Layer 3 connected: voice → PIN → face → lockout
-- Session expiry re-verification at stricter threshold (0.92)
-- Voice OTP for payment with PIN fallback on fail
-- Location check before payment authorization
-- Merchant selection by name or number
-- Real checkout totals with Nova fee
-- FIFO queue buffer
-- Emergency / stop / pause / resume / help
-- All-voice audit logging
+AGREED FLOW:
+──────────────────────────────────────────────────
+1. No voice auth blocking in web — NEEDS_VERIFICATION = []
+2. Payment flow: order → merchant → yes → Voice OTP → payment
+3. OTP fail x2 → PIN fallback → payment denied if PIN fails
+4. Location check after OTP pass
+5. Session expiry warning at < 2 min (session_start tracked)
+6. Full L3 auth available via: python layer3_main.py (terminal only)
+7. All other features: emergency, stop, pause, resume, help, buffer
+──────────────────────────────────────────────────
 """
 
 from intent_classifier import IntentClassifier, IntentResult
@@ -49,13 +27,12 @@ sys.path.insert(0, os.path.abspath(L3_PATH))
 
 L3_AVAILABLE = False
 try:
-    from layer3_main import authenticate, check_session, authorize_payment
-    from verify import verify_for_payment
+    from layer3_main import check_session
     from pin_handler import verify_pin
     L3_AVAILABLE = True
-    print("[Layer 7] Layer 3 connected — real voice verification active")
+    print("[Layer 7] Layer 3 connected — session/PIN checking active")
 except ImportError as e:
-    print(f"[Layer 7] Layer 3 not available ({e}) — running in simulation mode")
+    print(f"[Layer 7] Layer 3 not available ({e}) — simulation mode")
 
 # ── Connect to Mock Commerce ──────────────────────────────────────────────────
 COMMERCE_AVAILABLE = False
@@ -80,11 +57,14 @@ except ImportError:
 
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-NEEDS_VERIFICATION    = []
-CONTEXT_DECAY_SECONDS = 300
-QUEUE_MAX             = 5
-OTP_MAX_ATTEMPTS      = 2
-PIN_MAX_ATTEMPTS      = 3
+NEEDS_VERIFICATION     = []          # [] = no voice auth blocking in web
+                                     # add "payment" when WebSocket mic ready
+CONTEXT_DECAY_SECONDS  = 300
+QUEUE_MAX              = 5
+OTP_MAX_ATTEMPTS       = 2
+PIN_MAX_ATTEMPTS       = 3
+SESSION_DURATION       = 900         # 15 minutes
+SESSION_WARN_SECONDS   = 120         # warn when < 2 min remaining
 
 
 # ── Dataclasses ───────────────────────────────────────────────────────────────
@@ -112,11 +92,11 @@ class DialogueState:
     confirm_action: str = None
     confirm_details: dict = field(default_factory=dict)
 
-    # Layer 3 session
+    # Session
     session_token: str = None
     session_valid: bool = False
     session_start: float = None
-    session_duration: int = 900
+    session_duration: int = SESSION_DURATION
 
     # OTP / PIN tracking
     otp_attempts: int = 0
@@ -146,7 +126,8 @@ def build_response(
     verification_status: str = None,
     queued: bool = False,
     queue_position: int = None,
-    buffered_response: dict = None
+    buffered_response: dict = None,
+    session_warning: str = None
 ) -> dict:
     return {
         "nova_says":           message,
@@ -160,6 +141,7 @@ def build_response(
         "queued":              queued,
         "queue_position":      queue_position,
         "buffered_response":   buffered_response,
+        "session_warning":     session_warning,
         "timestamp":           time.time()
     }
 
@@ -260,8 +242,8 @@ def handle_order_flow(entities: dict, raw_text: str, dm_state) -> dict:
     """
     Full order flow:
       1. Fresh search → multiple results → ask to pick
-      2. Merchant pick → basket + checkout
-      3. CONFIRM_PENDING → yes → OTP → location → payment
+      2. Merchant pick by name or number → basket + checkout
+      3. CONFIRM_PENDING → yes → OTP → location check → payment
     """
 
     # ── Merchant already listed — user is picking ─────────────────────────────
@@ -396,6 +378,7 @@ def handle_order_flow(entities: dict, raw_text: str, dm_state) -> dict:
             state="IDLE", intent="payment", routing="No results"
         )
 
+    # Fallback
     return build_response(
         message="Found Starbucks 0.4 miles away. Frappuccino $6.50. Confirm?",
         state="CONFIRM_PENDING", intent="payment", routing="Fallback",
@@ -442,9 +425,11 @@ class DialogueManager:
 
     def speaking_started(self):
         self.state.is_speaking = True
+        print("[dialogue] Nova started speaking — buffer active")
 
     def speaking_done(self) -> Optional[dict]:
         self.state.is_speaking = False
+        print("[dialogue] Nova finished speaking — checking buffer...")
         if self.state.command_buffer:
             next_cmd  = self.state.command_buffer.pop(0)
             wait_time = round(time.time() - next_cmd.received_at, 1)
@@ -454,11 +439,13 @@ class DialogueManager:
             if self.state.command_buffer:
                 response["nova_says"] += f" ({len(self.state.command_buffer)} more in queue)"
             return response
+        print("[dialogue] Buffer empty — returning to IDLE")
         return None
 
     def _push_to_buffer(self, text: str) -> dict:
         position = len(self.state.command_buffer) + 1
         self.state.command_buffer.append(QueuedCommand(text=text))
+        print(f"[dialogue] Buffered: '{text}' at position {position}")
         return build_response(
             message="Got it. I'll answer that next — finishing current response first.",
             state="BUFFERED", intent="buffered",
@@ -480,13 +467,24 @@ class DialogueManager:
                 return False
         return (time.time() - (self.state.session_start or 0)) < self.state.session_duration
 
-    def _run_layer3_auth(self) -> tuple:
-        if L3_AVAILABLE:
-            token = authenticate(self._driver_id, verbose=False)
-            return (True, token) if token else (False, "All auth levels failed")
-        self.state.session_start = time.time()
-        self.state.session_valid = True
-        return True, "simulated_token"
+    def _session_time_remaining(self) -> int:
+        """Returns seconds remaining in session. 0 if expired."""
+        if not self.state.session_start:
+            return 0
+        elapsed = time.time() - self.state.session_start
+        remaining = int(self.state.session_duration - elapsed)
+        return max(0, remaining)
+
+    def _get_session_warning(self) -> Optional[str]:
+        """Returns warning string if session expiring soon, else None."""
+        remaining = self._session_time_remaining()
+        if 0 < remaining <= SESSION_WARN_SECONDS:
+            mins = remaining // 60
+            secs = remaining % 60
+            if mins > 0:
+                return f"Session expires in {mins} min {secs} sec."
+            return f"Session expires in {secs} seconds."
+        return None
 
     def _start_session(self, token: str):
         self.state.session_token = token
@@ -534,6 +532,10 @@ class DialogueManager:
         if response.get("nova_says"):
             self._last_nova_response = response["nova_says"]
             self._add_to_history("nova", response["nova_says"], response.get("intent", ""))
+        # Attach session warning to every response if applicable
+        warning = self._get_session_warning()
+        if warning and not response.get("session_warning"):
+            response["session_warning"] = warning
         return response
 
     def _check_location(self, entities: dict) -> dict:
@@ -627,12 +629,11 @@ class DialogueManager:
                 self.state.fsm_state  = "IDLE"
                 return self._store_response(build_response(
                     message=f"Paused. Saved your {self._paused_intent} request. Say resume when ready.",
-                    state="IDLE", intent="pause",
-                    routing="Paused — intent saved"
+                    state="IDLE", intent="pause", routing="Paused — intent saved"
                 ))
             return self._store_response(build_response(
-                message="Nothing active to pause.", state="IDLE", intent="pause",
-                routing="Nothing to pause"
+                message="Nothing active to pause.", state="IDLE",
+                intent="pause", routing="Nothing to pause"
             ))
 
         # ── Resume ────────────────────────────────────────────────────────────
@@ -650,8 +651,8 @@ class DialogueManager:
                 response["resume_message"] = f"Resuming your {restored_intent} request."
                 return self._store_response(response)
             return self._store_response(build_response(
-                message="Nothing to resume.", state="IDLE", intent="resume",
-                routing="No paused context"
+                message="Nothing to resume.", state="IDLE",
+                intent="resume", routing="No paused context"
             ))
 
         # ── Help ──────────────────────────────────────────────────────────────
@@ -697,12 +698,6 @@ class DialogueManager:
         if self.state.fsm_state == "LOCATION_CONFIRM":
             return self._store_response(self._handle_location_confirm(user_input))
 
-        if self.state.fsm_state == "VERIFY":
-            return self._store_response(self._handle_verify(user_input))
-
-        if self.state.fsm_state == "SESSION_REAUTH":
-            return self._store_response(self._handle_session_reauth(user_input))
-
         # ── Normal flow ───────────────────────────────────────────────────────
         resolved_text = self._resolve_context(user_input)
         result        = self.classifier.classify(resolved_text)
@@ -715,31 +710,11 @@ class DialogueManager:
             is_verified = self._is_session_valid()
         )
 
-        # Payment: check session token (per architecture diagram)
-        if result.intent in NEEDS_VERIFICATION:
-            if not self._is_session_valid():
-                if self.state.session_token:
-                    # Session existed but expired → stricter re-auth
-                    self.state.fsm_state        = "SESSION_REAUTH"
-                    self.state.pending_entities = result.entities
-                    self.state.current_intent   = result.intent
-                    return self._store_response(build_response(
-                        message="Your session has expired. Please verify your identity again to continue.",
-                        state="SESSION_REAUTH", intent=result.intent,
-                        routing="Session expired — re-verify at 0.92 threshold",
-                        verification_status="expired"
-                    ))
-                else:
-                    # First time → full L3 auth
-                    self.state.fsm_state        = "VERIFY"
-                    self.state.pending_entities = result.entities
-                    self.state.current_intent   = result.intent
-                    return self._store_response(build_response(
-                        message="Payment requires identity verification. Say anything to begin.",
-                        state="VERIFY", intent=result.intent,
-                        routing="Layer 3 — full auth: voice → PIN → face → lockout",
-                        verification_status="needed"
-                    ))
+        # Session check for payment — warn if expiring soon
+        if result.intent == "payment" and self._is_session_valid():
+            warning = self._get_session_warning()
+            if warning:
+                print(f"[dialogue] Session warning: {warning}")
 
         missing = self._check_missing_slots(result.intent, result.entities)
         if missing:
@@ -780,126 +755,6 @@ class DialogueManager:
     # STATE HANDLERS
     # ══════════════════════════════════════════════════════════════════════════
 
-    def _handle_verify(self, user_input: str) -> dict:
-        """
-        Full L3 auth: voice → PIN fallback → face fallback → lockout.
-        layer3_main.authenticate() handles all 3 levels.
-        """
-        print(f"[Layer 7] Starting Layer 3 full auth for: {self._driver_id}")
-        success, token_or_error = self._run_layer3_auth()
-
-        if success:
-            self._start_session(token_or_error)
-            self.state.fsm_state = "IDLE"
-            filled = IntentResult(intent=self.state.current_intent, confidence=1.0,
-                                  entities=self.state.pending_entities, raw_text=user_input)
-            response = self._route(filled)
-            response["verify_message"]      = "Identity verified. Session active — 15 minutes."
-            response["session_started"]     = True
-            response["verification_status"] = "passed"
-            return response
-        else:
-            # All 3 levels failed — full lockout
-            self.state.fsm_state  = "IDLE"
-            self.state.locked_out = True
-            self.state.current_intent = None
-            _log_command(self._driver_id, user_input, "lockout", False)
-            return build_response(
-                message="All authentication levels failed — voice, PIN, and face ID. System locked. Please contact support.",
-                state="LOCKED", intent="lockout",
-                routing="Layer 3 — all 3 levels failed — system locked",
-                action="lockout", verification_status="locked"
-            )
-
-    def _handle_session_reauth(self, user_input: str) -> dict:
-        """
-        Session expired during payment.
-        Re-verify voice at stricter threshold (0.92).
-        Fail → spoken PIN fallback.
-        """
-        print(f"[Layer 7] Session expired — re-verifying for payment at 0.92 threshold")
-
-        if L3_AVAILABLE:
-            try:
-                result = verify_for_payment(self._driver_id, verbose=False)
-                if result.get("passed"):
-                    token = authenticate(self._driver_id, verbose=False)
-                    if token:
-                        self._start_session(token)
-                    self.state.fsm_state = "IDLE"
-                    filled = IntentResult(intent=self.state.current_intent, confidence=1.0,
-                                          entities=self.state.pending_entities, raw_text=user_input)
-                    response = self._route(filled)
-                    response["verify_message"]      = "Re-verified. Continuing with payment."
-                    response["verification_status"] = "reauth_passed"
-                    return response
-                else:
-                    # Voice failed at payment threshold → PIN fallback
-                    self.state.fsm_state    = "PIN_PAYMENT_PENDING"
-                    self.state.pin_attempts = 0
-                    return build_response(
-                        message="Voice re-verification failed. Please say your PIN to authorize payment.",
-                        state="PIN_PAYMENT_PENDING", intent="payment",
-                        routing="Session reauth failed — PIN fallback for payment",
-                        verification_status="reauth_voice_failed"
-                    )
-            except Exception as e:
-                print(f"[Layer 7] Re-auth error: {e}")
-
-        # Simulation — auto pass
-        self.state.fsm_state = "IDLE"
-        filled = IntentResult(intent=self.state.current_intent, confidence=1.0,
-                              entities=self.state.pending_entities, raw_text=user_input)
-        return self._route(filled)
-
-    def _handle_pin_for_payment(self, user_input: str) -> dict:
-        """
-        PIN fallback for payment (per diagram: PIN FALLBACK FOR PAYMENT).
-        Max PIN_MAX_ATTEMPTS then payment denied.
-        """
-        self.state.pin_attempts += 1
-        pin_input = user_input.strip()
-
-        # Try L3 PIN verify if available
-        pin_ok = False
-        if L3_AVAILABLE:
-            try:
-                pin_ok = verify_pin(self._driver_id, pin_input)
-            except Exception as e:
-                print(f"[Layer 7] PIN verify error: {e}")
-                # Simulation fallback: accept any 4-digit input
-                pin_ok = pin_input.isdigit() and len(pin_input) == 4
-        else:
-            pin_ok = pin_input.isdigit() and len(pin_input) == 4
-
-        if pin_ok:
-            self.state.fsm_state    = "IDLE"
-            self.state.pin_attempts = 0
-            filled = IntentResult(intent=self.state.current_intent, confidence=1.0,
-                                  entities=self.state.pending_entities, raw_text=user_input)
-            response = self._route(filled)
-            response["verify_message"]      = "PIN verified. Continuing with payment."
-            response["verification_status"] = "pin_passed"
-            return response
-
-        if self.state.pin_attempts >= PIN_MAX_ATTEMPTS:
-            self.state.fsm_state      = "IDLE"
-            self.state.pin_attempts   = 0
-            self.state.current_intent = None
-            return build_response(
-                message="PIN verification failed. Payment denied. Please try again later.",
-                state="IDLE", intent="payment",
-                routing="PIN fallback failed — payment denied",
-                action="payment_denied", verification_status="pin_failed"
-            )
-
-        remaining = PIN_MAX_ATTEMPTS - self.state.pin_attempts
-        return build_response(
-            message=f"Incorrect PIN. {remaining} attempt{'s' if remaining > 1 else ''} remaining.",
-            state="PIN_PAYMENT_PENDING", intent="payment",
-            routing=f"PIN attempt {self.state.pin_attempts}/{PIN_MAX_ATTEMPTS}"
-        )
-
     def _handle_slot_fill(self, user_input: str) -> dict:
         self.state.slot_attempt += 1
         if self.state.slot_attempt > 3:
@@ -931,7 +786,7 @@ class DialogueManager:
         """CONFIRM_PENDING: merchant selection OR yes/no for order."""
         user_lower = user_input.lower().strip()
 
-        # Merchant list pending — this is a selection, not yes/no
+        # Merchant list pending — this is a selection not yes/no
         if self.state.pending_entities.get("merchants"):
             return handle_order_flow({}, user_input, self.state)
 
@@ -963,9 +818,8 @@ class DialogueManager:
 
     def _handle_otp(self, user_input: str) -> dict:
         """
-        OTP_PENDING: match spoken digits.
-        Pass → location check → payment.
-        Fail up to OTP_MAX_ATTEMPTS → PIN fallback for payment.
+        OTP match → location check → payment.
+        Fail x OTP_MAX_ATTEMPTS → PIN fallback.
         """
         spoken = [NUMBER_WORDS[w.strip(".,!?")] for w in user_input.lower().split()
                   if w.strip(".,!?") in NUMBER_WORDS]
@@ -976,10 +830,8 @@ class DialogueManager:
             location = self._check_location(self.state.pending_entities)
 
             if location["known"]:
-                # Known GPS → process payment directly
                 return self._process_payment_final()
             else:
-                # Unknown location → ask driver
                 self.state.fsm_state = "LOCATION_CONFIRM"
                 return build_response(
                     message="OTP verified. GPS location is unfamiliar. Can you confirm you're at a safe location? Say YES to proceed.",
@@ -990,7 +842,6 @@ class DialogueManager:
             self.state.otp_attempts += 1
 
             if self.state.otp_attempts >= OTP_MAX_ATTEMPTS:
-                # OTP max attempts → PIN fallback for payment (per diagram)
                 self._otp_active          = None
                 self.state.otp_attempts   = 0
                 self.state.pin_attempts   = 0
@@ -998,12 +849,11 @@ class DialogueManager:
                 return build_response(
                     message="OTP did not match. Please say your PIN to authorize payment instead.",
                     state="PIN_PAYMENT_PENDING", intent="payment",
-                    routing="OTP failed max attempts — PIN fallback for payment",
+                    routing="OTP failed max attempts — PIN fallback",
                     action="otp_failed_pin_fallback"
                 )
 
-            # Give new OTP for retry
-            new_otp = generate_otp()
+            new_otp          = generate_otp()
             self._otp_active = new_otp
             return build_response(
                 message=f"OTP did not match. New code: {otp_to_words(new_otp)}. Please repeat.",
@@ -1012,8 +862,46 @@ class DialogueManager:
                 otp=new_otp
             )
 
+    def _handle_pin_for_payment(self, user_input: str) -> dict:
+        """PIN fallback — max PIN_MAX_ATTEMPTS then payment denied."""
+        self.state.pin_attempts += 1
+        pin_input = user_input.strip()
+
+        pin_ok = False
+        if L3_AVAILABLE:
+            try:
+                pin_ok = verify_pin(self._driver_id, pin_input)
+            except Exception as e:
+                print(f"[Layer 7] PIN verify error: {e}")
+                pin_ok = pin_input.isdigit() and len(pin_input) == 4
+        else:
+            pin_ok = pin_input.isdigit() and len(pin_input) == 4
+
+        if pin_ok:
+            self.state.fsm_state    = "IDLE"
+            self.state.pin_attempts = 0
+            return self._process_payment_final()
+
+        if self.state.pin_attempts >= PIN_MAX_ATTEMPTS:
+            self.state.fsm_state      = "IDLE"
+            self.state.pin_attempts   = 0
+            self.state.current_intent = None
+            return build_response(
+                message="PIN verification failed. Payment denied. Please try again later.",
+                state="IDLE", intent="payment",
+                routing="PIN fallback failed — payment denied",
+                action="payment_denied", verification_status="pin_failed"
+            )
+
+        remaining = PIN_MAX_ATTEMPTS - self.state.pin_attempts
+        return build_response(
+            message=f"Incorrect PIN. {remaining} attempt{'s' if remaining > 1 else ''} remaining.",
+            state="PIN_PAYMENT_PENDING", intent="payment",
+            routing=f"PIN attempt {self.state.pin_attempts}/{PIN_MAX_ATTEMPTS}"
+        )
+
     def _handle_location_confirm(self, user_input: str) -> dict:
-        """LOCATION_CONFIRM: driver confirms unfamiliar location."""
+        """Driver confirms unfamiliar location."""
         if any(w in user_input.lower() for w in CONFIRM_YES):
             return self._process_payment_final()
         self.state.fsm_state = "IDLE"
@@ -1025,9 +913,13 @@ class DialogueManager:
         )
 
     def _process_payment_final(self) -> dict:
-        """Process payment after OTP verified and location cleared."""
+        """Process payment after OTP + location cleared."""
         self.state.fsm_state = "IDLE"
         entities = self.state.pending_entities
+
+        # Start a simulated session when payment completes (tracks expiry)
+        if not self.state.session_start:
+            self._start_session(f"web_session_{int(time.time())}")
 
         if COMMERCE_AVAILABLE and entities.get("basket_id"):
             result = process_payment(entities["basket_id"], entities)
@@ -1065,7 +957,7 @@ if __name__ == "__main__":
     dm = DialogueManager()
 
     print("\n" + "="*60)
-    print("  NOVA Layer 7 — Full Security Stack Test")
+    print("  NOVA Layer 7 — Test")
     print(f"  L3:{L3_AVAILABLE}  Commerce:{COMMERCE_AVAILABLE}  Audit:{AUDIT_AVAILABLE}")
     print("="*60)
 
@@ -1092,4 +984,4 @@ if __name__ == "__main__":
             e = otp_r.get("entities", {})
             if e.get("total"):
                 print(f"  Total : ${e['total']:.2f}  Fee: ${e['nova_fee']:.2f}")
-                print(f"  TXN   : {e.get('transaction_id','—')}")
+                print(f"  TXN   : {e.get('transaction_id', '—')}")
