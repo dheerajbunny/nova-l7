@@ -268,7 +268,7 @@ def enroll_face(driver_id: str, interactive: bool = True) -> bool:
 #  STEP 5 — ENROLL PIN
 # ══════════════════════════════════════════════════════════════════════════════
 
-def enroll_pin(driver_id: str) -> bool:
+def enroll_pin(driver_id: str, pin: str = None) -> bool:
     """
     Takes a PIN from the driver (typed for enrollment, spoken later),
     SHA-256 hashes it, and saves the hash.
@@ -283,18 +283,19 @@ def enroll_pin(driver_id: str) -> bool:
 
     import getpass
 
-    while True:
-        pin = getpass.getpass("  Enter 4-digit PIN (hidden): ")
-        if not pin.isdigit() or len(pin) != 4:
-            print("  ❌  PIN must be exactly 4 digits. Try again.")
-            continue
+    if pin is None:
+        while True:
+            pin = getpass.getpass("  Enter 4-digit PIN (hidden): ")
+            if not pin.isdigit() or len(pin) != 4:
+                print("  ❌  PIN must be exactly 4 digits. Try again.")
+                continue
 
-        confirm = getpass.getpass("  Confirm PIN: ")
-        if pin != confirm:
-            print("  ❌  PINs don't match. Try again.")
-            continue
+            confirm = getpass.getpass("  Confirm PIN: ")
+            if pin != confirm:
+                print("  ❌  PINs don't match. Try again.")
+                continue
 
-        break
+            break
 
     # Hash with SHA-256
     pin_hash = hashlib.sha256(pin.encode()).hexdigest()
