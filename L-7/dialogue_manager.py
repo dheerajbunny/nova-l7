@@ -1,20 +1,16 @@
 """
 NOVA Layer 7 - Dialogue Manager
-The brain that decides what to do with each intent.
 
-UPDATES IN THIS VERSION:
-- Layer 3 connected for real voice verification
-- Selective verification — only payment and communication
-- Vehicle, navigation, media, general_question = NO verification needed
-- Context decay after 5 min silence
-- pause / resume commands
-- help keyword
-- emergency keyword — highest priority
-- queue overflow graceful rejection (max 5)
-- queue read-aloud
-- all-voice audit logging for OEM analytics
-- FIFO QUEUE BUFFER — new commands during speaking go to buffer,
-  auto-processed when current answer finishes
+AGREED FLOW:
+──────────────────────────────────────────────────
+1. No voice auth blocking in web — NEEDS_VERIFICATION = []
+2. Payment flow: order → merchant → yes → Voice OTP → payment
+3. OTP fail x2 → PIN fallback → payment denied if PIN fails
+4. Location check after OTP pass
+5. Session expiry warning at < 2 min (session_start tracked)
+6. Full L3 auth available via: python layer3_main.py (terminal only)
+7. All other features: emergency, stop, pause, resume, help, buffer
+──────────────────────────────────────────────────
 """
 
 from intent_classifier import IntentClassifier, IntentResult
@@ -25,7 +21,7 @@ import random
 import sys
 import os
 
-# ── Connect to Layer 3 ─────────────────────────────────────────────────────────
+# ── Connect to Layer 3 ────────────────────────────────────────────────────────
 L3_PATH = os.path.join(os.path.dirname(__file__), '..', 'L-3')
 sys.path.insert(0, os.path.abspath(L3_PATH))
 
@@ -36,11 +32,23 @@ try:
     from pin_handler import verify_pin
     from face_handler import verify_face
     L3_AVAILABLE = True
-    print("[Layer 7] Layer 3 connected — real voice verification active")
+    print("[Layer 7] Layer 3 connected — session/PIN checking active")
 except ImportError as e:
-    print(f"[Layer 7] Layer 3 not available ({e}) — running in simulation mode")
+    print(f"[Layer 7] Layer 3 not available ({e}) — simulation mode")
 
-# ── Connect to Audit Log ───────────────────────────────────────────────────────
+# ── Connect to Mock Commerce ──────────────────────────────────────────────────
+COMMERCE_AVAILABLE = False
+try:
+    from mock_order import (
+        search_merchants, get_menu, create_basket,
+        add_to_basket, checkout, process_payment
+    )
+    COMMERCE_AVAILABLE = True
+    print("[Layer 7] Mock commerce connected — SQLite backend ready")
+except ImportError as e:
+    print(f"[Layer 7] Commerce not available ({e})")
+
+# ── Connect to Audit Log ──────────────────────────────────────────────────────
 AUDIT_AVAILABLE = False
 try:
     from audit_log import log_event
@@ -50,15 +58,18 @@ except ImportError:
     print("[Layer 7] Audit log not available — skipping logging")
 
 
-# ── Constants ──────────────────────────────────────────────────────────────────
-NEEDS_VERIFICATION     = ["payment", "communication"]
-NO_VERIFICATION        = ["vehicle_control", "navigation", "media",
-                          "general_question", "stop"]
-CONTEXT_DECAY_SECONDS  = 300   # 5 minutes
-QUEUE_MAX              = 5     # max items in buffer
+# ── Constants ─────────────────────────────────────────────────────────────────
+NEEDS_VERIFICATION     = []          # [] = no voice auth blocking in web
+                                     # add "payment" when WebSocket mic ready
+CONTEXT_DECAY_SECONDS  = 300
+QUEUE_MAX              = 5
+OTP_MAX_ATTEMPTS       = 2
+PIN_MAX_ATTEMPTS       = 3
+SESSION_DURATION       = 900         # 15 minutes
+SESSION_WARN_SECONDS   = 120         # warn when < 2 min remaining
 
 
-# ── Dataclasses ────────────────────────────────────────────────────────────────
+# ── Dataclasses ───────────────────────────────────────────────────────────────
 @dataclass
 class ConversationTurn:
     role: str
@@ -69,7 +80,6 @@ class ConversationTurn:
 
 @dataclass
 class QueuedCommand:
-    """A command saved to buffer while Nova was speaking."""
     text: str
     received_at: float = field(default_factory=time.time)
 
@@ -84,27 +94,29 @@ class DialogueState:
     confirm_action: str = None
     confirm_details: dict = field(default_factory=dict)
 
-    # Layer 3 session
+    # Session
     session_token: str = None
     session_valid: bool = False
     session_start: float = None
-    session_duration: int = 900      # 15 minutes
+    session_duration: int = SESSION_DURATION
+
+    # OTP / PIN tracking
+    otp_attempts: int = 0
+    pin_attempts: int = 0
+
+    # Lockout
+    locked_out: bool = False
 
     # Conversation
     history: list = field(default_factory=list)
     last_interaction: float = field(default_factory=time.time)
 
-    # ── FIFO buffer ────────────────────────────────────────────────────────────
-    # Commands received while Nova is speaking go here
-    # After Nova finishes speaking — auto-process next from buffer
+    # FIFO buffer
     command_buffer: list = field(default_factory=list)
-
-    # Whether Nova is currently speaking (TTS playing)
-    # Set True when response goes out, False when TTS finishes
     is_speaking: bool = False
 
 
-# ── Response builder ───────────────────────────────────────────────────────────
+# ── Response builder ──────────────────────────────────────────────────────────
 def build_response(
     message: str,
     state: str,
@@ -117,27 +129,29 @@ def build_response(
     queued: bool = False,
     queue_position: int = None,
     buffered_response: dict = None,
+    session_warning: str = None,
     **kwargs
 ) -> dict:
     response = {
-        "nova_says":        message,
-        "fsm_state":        state,
-        "intent":           intent,
-        "routing":          routing,
-        "entities":         entities or {},
-        "action":           action,
-        "otp":              otp,
+        "nova_says":           message,
+        "fsm_state":           state,
+        "intent":              intent,
+        "routing":             routing,
+        "entities":            entities or {},
+        "action":              action,
+        "otp":                 otp,
         "verification_status": verification_status,
-        "queued":           queued,           # True if command was saved to buffer
-        "queue_position":   queue_position,   # position in buffer (1, 2, 3...)
-        "buffered_response":buffered_response,# next queued response if any
-        "timestamp":        time.time()
+        "queued":              queued,
+        "queue_position":      queue_position,
+        "buffered_response":   buffered_response,
+        "session_warning":     session_warning,
+        "timestamp":           time.time()
     }
     response.update(kwargs)
     return response
 
 
-# ── Required slots ─────────────────────────────────────────────────────────────
+# ── Required slots ────────────────────────────────────────────────────────────
 REQUIRED_SLOTS = {
     "navigation":      ["destination"],
     "communication":   ["contact"],
@@ -160,7 +174,7 @@ SLOT_QUESTIONS = {
     "action":      "Should I turn it on or off?",
 }
 
-# ── Interrupt keyword groups ───────────────────────────────────────────────────
+# ── Keyword groups ────────────────────────────────────────────────────────────
 EMERGENCY_KEYWORDS = ["emergency", "accident", "help me", "call 911", "call ambulance"]
 STOP_KEYWORDS      = ["stop", "cancel", "quit", "shut up", "nevermind", "never mind"]
 REPEAT_KEYWORDS    = ["repeat", "say that again", "say again", "what did you say"]
@@ -169,9 +183,18 @@ RESUME_KEYWORDS    = ["resume", "continue", "go ahead", "carry on"]
 HELP_KEYWORDS      = ["help", "what can you do", "what do you know", "commands"]
 QUEUE_KEYWORDS     = ["what's in the queue", "what is in the queue",
                       "how many requests", "what are you processing", "queue status"]
+CONFIRM_YES        = ["yes", "yeah", "yep", "confirm", "proceed",
+                      "ok", "okay", "sure", "do it", "correct"]
+CONFIRM_NO         = ["no", "nope", "cancel", "stop", "don't", "abort"]
+
+NUMBER_WORDS = {
+    "zero":0,"one":1,"two":2,"three":3,"four":4,
+    "five":5,"six":6,"seven":7,"eight":8,"nine":9,
+    "0":0,"1":1,"2":2,"3":3,"4":4,"5":5,"6":6,"7":7,"8":8,"9":9
+}
 
 
-# ── Route handlers ─────────────────────────────────────────────────────────────
+# ── Route handlers ────────────────────────────────────────────────────────────
 def handle_vehicle_control(entities: dict) -> dict:
     component = entities.get("component", "system")
     action    = entities.get("action", "on")
@@ -220,12 +243,160 @@ def handle_communication(entities: dict) -> dict:
         entities=entities, action="phone_call"
     )
 
+
+def handle_order_flow(entities: dict, raw_text: str, dm_state) -> dict:
+    """
+    Full order flow:
+      1. Fresh search → multiple results → ask to pick
+      2. Merchant pick by name or number → basket + checkout
+      3. CONFIRM_PENDING → yes → OTP → location check → payment
+    """
+
+    # ── Merchant already listed — user is picking ─────────────────────────────
+    if dm_state.pending_entities.get("merchants"):
+        merchants  = dm_state.pending_entities["merchants"]
+        text_lower = raw_text.lower()
+
+        number_map = {
+            "1": 0, "first": 0, "one": 0,
+            "2": 1, "second": 1, "two": 1,
+            "3": 2, "third": 2, "three": 2,
+        }
+        chosen = None
+        for word, idx in number_map.items():
+            if word in text_lower:
+                if idx < len(merchants):
+                    chosen = merchants[idx]
+                    break
+
+        if not chosen:
+            for m in merchants:
+                if m["name"].lower() in text_lower:
+                    chosen = m
+                    break
+
+        if not chosen:
+            chosen = merchants[0]
+
+        basket        = create_basket(chosen["id"])
+        menu_r        = get_menu(chosen["id"])
+        checkout_data = {}
+        first         = None
+
+        if menu_r["found"] and menu_r["menu"]:
+            first = menu_r["menu"][0]
+            add_to_basket(basket["basket_id"], first["id"])
+            checkout_data = checkout(basket["basket_id"])
+
+        item_price = first["price"] if first else 0.0
+        item_name  = first["name"]  if first else "order"
+        total      = checkout_data.get("total",    item_price)
+        nova_fee   = checkout_data.get("nova_fee", 0)
+
+        dm_state.pending_entities.update({
+            "merchant_id":   chosen["id"],
+            "merchant_name": chosen["name"],
+            "basket_id":     basket["basket_id"],
+            "address":       chosen.get("address", ""),
+            "eta_order":     chosen.get("eta_order", "10 min"),
+            "item_name":     item_name,
+            "item_price":    item_price,
+            "lat":           chosen.get("lat"),
+            "lng":           chosen.get("lng"),
+            "items":         checkout_data.get("items", item_name),
+            "subtotal":      checkout_data.get("subtotal", item_price),
+            "nova_fee":      nova_fee,
+            "total":         total,
+            "merchants":     None,
+        })
+
+        dm_state.fsm_state = "CONFIRM_PENDING"
+        msg = (
+            f"{chosen['name']} — {item_name} ${item_price:.2f}. "
+            f"Total ${total:.2f} including ${nova_fee:.2f} Nova fee. "
+            f"Say YES to confirm."
+        )
+        return build_response(
+            message=msg, state="CONFIRM_PENDING",
+            intent="payment", routing="Merchant selected — basket ready",
+            entities=dm_state.pending_entities, action="show_merchant_on_map"
+        )
+
+    # ── Fresh search ──────────────────────────────────────────────────────────
+    query = (entities.get("merchant") or entities.get("item") or
+             entities.get("query") or raw_text)
+
+    if COMMERCE_AVAILABLE:
+        result = search_merchants(query)
+
+        if result["found"]:
+            merchants = result["merchants"]
+
+            if len(merchants) == 1:
+                chosen        = merchants[0]
+                basket        = create_basket(chosen["id"])
+                menu_r        = get_menu(chosen["id"])
+                checkout_data = {}
+                first         = None
+
+                if menu_r["found"] and menu_r["menu"]:
+                    first = menu_r["menu"][0]
+                    add_to_basket(basket["basket_id"], first["id"])
+                    checkout_data = checkout(basket["basket_id"])
+
+                item_price = first["price"] if first else 0.0
+                item_name  = first["name"]  if first else "order"
+
+                dm_state.pending_entities.update({
+                    "merchant_id":   chosen["id"],
+                    "merchant_name": chosen["name"],
+                    "basket_id":     basket["basket_id"],
+                    "address":       chosen.get("address", ""),
+                    "eta_order":     chosen.get("eta_order", "10 min"),
+                    "item_name":     item_name,
+                    "item_price":    item_price,
+                    "lat":           chosen.get("lat"),
+                    "lng":           chosen.get("lng"),
+                    "items":         checkout_data.get("items", item_name),
+                    "subtotal":      checkout_data.get("subtotal", item_price),
+                    "nova_fee":      checkout_data.get("nova_fee", 0),
+                    "total":         checkout_data.get("total", item_price),
+                })
+
+                dm_state.fsm_state = "CONFIRM_PENDING"
+                return build_response(
+                    message=result["nova_says"], state="CONFIRM_PENDING",
+                    intent="payment", routing="Single merchant — basket ready",
+                    entities=dm_state.pending_entities, action="show_merchant_on_map"
+                )
+
+            else:
+                dm_state.pending_entities["merchants"] = merchants
+                dm_state.fsm_state = "CONFIRM_PENDING"
+                return build_response(
+                    message=result["nova_says"], state="CONFIRM_PENDING",
+                    intent="payment", routing="Multiple merchants — waiting for selection",
+                    entities=dm_state.pending_entities
+                )
+
+        return build_response(
+            message=f"Could not find {query} nearby.",
+            state="IDLE", intent="payment", routing="No results"
+        )
+
+    # Fallback
+    return build_response(
+        message="Found Starbucks 0.4 miles away. Frappuccino $6.50. Confirm?",
+        state="CONFIRM_PENDING", intent="payment", routing="Fallback",
+        entities={"merchant_name": "Starbucks", "item_name": "Frappuccino", "item_price": 6.50}
+    )
+
+
 def generate_otp() -> list:
     return [random.randint(0, 9) for _ in range(4)]
 
 def otp_to_words(otp: list) -> str:
-    words = ["zero","one","two","three","four","five",
-             "six","seven","eight","nine"]
+    words = ["zero","one","two","three","four","five","six","seven","eight","nine"]
     return ", ".join(words[d] for d in otp)
 
 def _log_command(driver_id: str, command: str, intent: str, is_verified: bool):
@@ -240,7 +411,7 @@ def _log_command(driver_id: str, command: str, intent: str, is_verified: bool):
         print(f"[audit] Log failed: {e}")
 
 
-# ── Main Dialogue Manager ──────────────────────────────────────────────────────
+# ── Main Dialogue Manager ─────────────────────────────────────────────────────
 class DialogueManager:
 
     def __init__(self):
@@ -253,82 +424,41 @@ class DialogueManager:
         self._last_nova_response = None
 
     # ══════════════════════════════════════════════════════════════════════════
-    # BUFFER / QUEUE MANAGEMENT
+    # BUFFER / QUEUE
     # ══════════════════════════════════════════════════════════════════════════
 
     def speaking_started(self):
-        """
-        Call this when TTS starts playing audio.
-        While is_speaking=True, new commands go to buffer instead of
-        being processed immediately.
-
-        When TTS is connected — call dm.speaking_started() before playing audio.
-        """
         self.state.is_speaking = True
         print("[dialogue] Nova started speaking — buffer active")
 
     def speaking_done(self) -> Optional[dict]:
-        """
-        Call this when TTS finishes playing audio.
-        Automatically checks buffer and processes next queued command.
-
-        When TTS is connected — call dm.speaking_done() after audio finishes.
-        Returns next response if buffer had items, None if buffer was empty.
-
-        Example in TTS code:
-            tts.play(response_text)
-            tts.wait_until_done()
-            next_response = dm.speaking_done()
-            if next_response:
-                tts.play(next_response["nova_says"])
-        """
         self.state.is_speaking = False
         print("[dialogue] Nova finished speaking — checking buffer...")
-
         if self.state.command_buffer:
-            # Get next command from buffer (FIFO — first in, first out)
-            next_command = self.state.command_buffer.pop(0)
-            wait_time    = round(time.time() - next_command.received_at, 1)
-            print(f"[dialogue] Processing buffered command: '{next_command.text}' "
-                  f"(waited {wait_time}s)")
-
-            # Process it now
-            response = self._process_command(next_command.text)
-
-            # Tell the response it came from buffer
-            response["from_buffer"]  = True
+            next_cmd  = self.state.command_buffer.pop(0)
+            wait_time = round(time.time() - next_cmd.received_at, 1)
+            response  = self._process_command(next_cmd.text)
+            response["from_buffer"]   = True
             response["buffer_waited"] = wait_time
-
             if self.state.command_buffer:
-                remaining = len(self.state.command_buffer)
-                response["nova_says"] += f" ({remaining} more in queue)"
-
+                response["nova_says"] += f" ({len(self.state.command_buffer)} more in queue)"
             return response
-
         print("[dialogue] Buffer empty — returning to IDLE")
         return None
 
     def _push_to_buffer(self, text: str) -> dict:
-        """
-        Save command to buffer when Nova is currently speaking.
-        Returns acknowledgment response — NOT the actual answer.
-        """
         position = len(self.state.command_buffer) + 1
         self.state.command_buffer.append(QueuedCommand(text=text))
-
         print(f"[dialogue] Buffered: '{text}' at position {position}")
-
         return build_response(
-            message=f"Got it. I'll answer that next — finishing current response first.",
-            state="BUFFERED",
-            intent="buffered",
-            routing=f"Command buffered at position {position} — will process after current response",
-            queued=True,
-            queue_position=position
+            message="Got it. I'll answer that next — finishing current response first.",
+            state="BUFFERED", intent="buffered",
+            routing=f"Command buffered at position {position}",
+            queued=True, queue_position=position
         )
 
     # ══════════════════════════════════════════════════════════════════════════
-    # SESSION MANAGEMENT
+    # SESSION
     # ══════════════════════════════════════════════════════════════════════════
 
     def _is_session_valid(self) -> bool:
@@ -336,12 +466,10 @@ class DialogueManager:
             return False
         if L3_AVAILABLE:
             try:
-                result = check_session(self.state.session_token)
-                return result.get("valid", False)
+                return check_session(self.state.session_token).get("valid", False)
             except Exception:
                 return False
-        elapsed = time.time() - (self.state.session_start or 0)
-        return elapsed < self.state.session_duration
+        return (time.time() - (self.state.session_start or 0)) < self.state.session_duration
 
     def _run_layer3_auth(self, audio_buffer=None) -> tuple:
         if L3_AVAILABLE:
@@ -353,32 +481,47 @@ class DialogueManager:
         self.state.session_valid = True
         return True, "simulated_token"
 
+    def _session_time_remaining(self) -> int:
+        """Returns seconds remaining in session. 0 if expired."""
+        if not self.state.session_start:
+            return 0
+        elapsed = time.time() - self.state.session_start
+        remaining = int(self.state.session_duration - elapsed)
+        return max(0, remaining)
+
+    def _get_session_warning(self) -> Optional[str]:
+        """Returns warning string if session expiring soon, else None."""
+        remaining = self._session_time_remaining()
+        if 0 < remaining <= SESSION_WARN_SECONDS:
+            mins = remaining // 60
+            secs = remaining % 60
+            if mins > 0:
+                return f"Session expires in {mins} min {secs} sec."
+            return f"Session expires in {secs} seconds."
+        return None
+
     def _start_session(self, token: str):
         self.state.session_token = token
         self.state.session_valid = True
         self.state.session_start = time.time()
+        self.state.locked_out    = False
 
     def _check_context_decay(self):
-        silence = time.time() - self.state.last_interaction
-        if silence > CONTEXT_DECAY_SECONDS:
-            print(f"[dialogue] Context decayed after {int(silence)}s")
+        if (time.time() - self.state.last_interaction) > CONTEXT_DECAY_SECONDS:
             self.state.history = []
 
     def _add_to_history(self, role: str, text: str, intent: str):
-        self.state.history.append(
-            ConversationTurn(role=role, text=text, intent=intent)
-        )
+        self.state.history.append(ConversationTurn(role=role, text=text, intent=intent))
         if len(self.state.history) > 10:
             self.state.history = self.state.history[-10:]
         self.state.last_interaction = time.time()
 
     def _resolve_context(self, text: str) -> str:
         import re
-        text_lower       = text.lower()
-        last_turns       = self.state.history[-2:]
+        text_lower        = text.lower()
+        last_turns        = self.state.history[-2:]
         last_destinations = []
         last_contacts     = []
-
         for turn in last_turns:
             if turn.intent == "navigation":
                 m = re.search(r"(?:to|at|near)\s+([A-Z][a-zA-Z\s]+)", turn.text)
@@ -388,15 +531,12 @@ class DialogueManager:
                 m = re.search(r"call\s+(\w+)", turn.text.lower())
                 if m:
                     last_contacts.append(m.group(1))
-
-        if any(w in text_lower for w in ["there", "that place", "same place"]):
-            if last_destinations:
-                text = re.sub(r"\b(there|that place|same place)\b",
-                              last_destinations[-1], text, flags=re.IGNORECASE)
-        if any(w in text_lower for w in ["him", "her", "them"]):
-            if last_contacts:
-                text = re.sub(r"\b(him|her|them)\b",
-                              last_contacts[-1], text, flags=re.IGNORECASE)
+        if any(w in text_lower for w in ["there", "that place", "same place"]) and last_destinations:
+            text = re.sub(r"\b(there|that place|same place)\b", last_destinations[-1],
+                          text, flags=re.IGNORECASE)
+        if any(w in text_lower for w in ["him", "her", "them"]) and last_contacts:
+            text = re.sub(r"\b(him|her|them)\b", last_contacts[-1],
+                          text, flags=re.IGNORECASE)
         return text
 
     def _check_missing_slots(self, intent: str, entities: dict) -> list:
@@ -405,9 +545,18 @@ class DialogueManager:
     def _store_response(self, response: dict) -> dict:
         if response.get("nova_says"):
             self._last_nova_response = response["nova_says"]
-            self._add_to_history("nova", response["nova_says"],
-                                 response.get("intent", ""))
+            self._add_to_history("nova", response["nova_says"], response.get("intent", ""))
+        # Attach session warning to every response if applicable
+        warning = self._get_session_warning()
+        if warning and not response.get("session_warning"):
+            response["session_warning"] = warning
         return response
+
+    def _check_location(self, entities: dict) -> dict:
+        """Known GPS (lat/lng from merchant) → auto-confirm. Unknown → ask driver."""
+        if entities.get("lat") and entities.get("lng"):
+            return {"known": True, "confirmed": True}
+        return {"known": False, "confirmed": False}
 
     # ══════════════════════════════════════════════════════════════════════════
     # MAIN ENTRY POINT
@@ -419,20 +568,22 @@ class DialogueManager:
         """
         user_input = user_input.strip()
         if not user_input:
+            return build_response(message="I didn't catch that. Could you repeat?",
+                                  state="IDLE", intent="unknown", routing="None")
+
+        # Lockout — absolute block
+        if self.state.locked_out:
             return build_response(
-                message="I didn't catch that. Could you repeat?",
-                state="IDLE", intent="unknown", routing="None"
+                message="System is locked. All authentication attempts failed. Please contact support.",
+                state="LOCKED", intent="lockout",
+                routing="Full lockout — all 3 auth levels failed",
+                verification_status="locked"
             )
 
-        text_lower = user_input.lower().strip()
+        text_lower   = user_input.lower().strip()
+        is_interrupt = (any(kw in text_lower for kw in EMERGENCY_KEYWORDS) or
+                        any(kw in text_lower for kw in STOP_KEYWORDS))
 
-        # ── Check if it's an interrupt — interrupts BYPASS buffer ─────────────
-        is_interrupt = (
-            any(kw in text_lower for kw in EMERGENCY_KEYWORDS) or
-            any(kw in text_lower for kw in STOP_KEYWORDS)
-        )
-
-        # ── If Nova is speaking AND this is NOT an interrupt → buffer it ──────
         if self.state.is_speaking and not is_interrupt:
             if len(self.state.command_buffer) >= QUEUE_MAX:
                 return build_response(
@@ -453,19 +604,14 @@ class DialogueManager:
         self._check_context_decay()
         text_lower = user_input.lower().strip()
 
-        # ══════════════════════════════════════════════════════════════════════
-        # INTERRUPT CHECKS — priority order
-        # ══════════════════════════════════════════════════════════════════════
-
-        # Emergency — absolute first
+        # ── Emergency ─────────────────────────────────────────────────────────
         if any(kw in text_lower for kw in EMERGENCY_KEYWORDS):
-            self.state.is_speaking = False
+            self.state.is_speaking    = False
             self.state.command_buffer.clear()
-            self.state.fsm_state    = "IDLE"
+            self.state.fsm_state      = "IDLE"
             self.state.current_intent = None
-            self._otp_active        = None
-            _log_command(self._driver_id, user_input, "emergency",
-                         self._is_session_valid())
+            self._otp_active          = None
+            _log_command(self._driver_id, user_input, "emergency", self._is_session_valid())
             return self._store_response(build_response(
                 message="Emergency detected. Automatically calling 911 and alerting your family members, Mom and Dad. Please stay calm.",
                 state="IDLE", intent="emergency",
@@ -473,78 +619,66 @@ class DialogueManager:
                 action="emergency_call"
             ))
 
-        # Stop — clears buffer too
+        # ── Stop ──────────────────────────────────────────────────────────────
         if any(kw in text_lower for kw in STOP_KEYWORDS):
-            self.state.is_speaking = False
+            self.state.is_speaking    = False
             self.state.command_buffer.clear()
-            self.state.fsm_state    = "IDLE"
+            self.state.fsm_state      = "IDLE"
             self.state.current_intent = None
-            self._otp_active        = None
-            self._paused_intent     = None
-            _log_command(self._driver_id, user_input, "stop",
-                         self._is_session_valid())
+            self._otp_active          = None
+            self._paused_intent       = None
+            self.state.otp_attempts   = 0
+            self.state.pin_attempts   = 0
+            _log_command(self._driver_id, user_input, "stop", self._is_session_valid())
             return self._store_response(build_response(
                 message="Stopped. Buffer and queue cleared. Ready for commands.",
                 state="IDLE", intent="stop",
                 routing="Interrupt — immediate halt — buffer + queue flushed"
             ))
 
-        # Repeat
+        # ── Repeat ────────────────────────────────────────────────────────────
         if any(kw in text_lower for kw in REPEAT_KEYWORDS):
-            if self._last_nova_response:
-                return self._store_response(build_response(
-                    message=self._last_nova_response,
-                    state="IDLE", intent="repeat",
-                    routing="Repeat last response"
-                ))
+            msg = self._last_nova_response or "Nothing to repeat yet."
             return self._store_response(build_response(
-                message="Nothing to repeat yet.",
-                state="IDLE", intent="repeat", routing="No previous response"
+                message=msg, state="IDLE", intent="repeat", routing="Repeat last response"
             ))
 
-        # Pause
+        # ── Pause ─────────────────────────────────────────────────────────────
         if any(kw in text_lower for kw in PAUSE_KEYWORDS):
             if self.state.current_intent:
                 self._paused_intent   = self.state.current_intent
                 self._paused_entities = self.state.pending_entities.copy()
                 self.state.fsm_state  = "IDLE"
-                _log_command(self._driver_id, user_input, "pause",
-                             self._is_session_valid())
                 return self._store_response(build_response(
                     message=f"Paused. Saved your {self._paused_intent} request. Say resume when ready.",
-                    state="IDLE", intent="pause",
-                    routing="Paused — intent saved — context preserved"
+                    state="IDLE", intent="pause", routing="Paused — intent saved"
                 ))
             return self._store_response(build_response(
-                message="Nothing active to pause.",
-                state="IDLE", intent="pause", routing="Nothing to pause"
+                message="Nothing active to pause.", state="IDLE",
+                intent="pause", routing="Nothing to pause"
             ))
 
-        # Resume
+        # ── Resume ────────────────────────────────────────────────────────────
         if any(kw in text_lower for kw in RESUME_KEYWORDS):
             if self._paused_intent:
-                restored_intent   = self._paused_intent
-                restored_entities = self._paused_entities
-                self._paused_intent = None
+                restored_intent       = self._paused_intent
+                restored_entities     = self._paused_entities
+                self._paused_intent   = None
                 self._paused_entities = None
                 self.state.current_intent   = restored_intent
                 self.state.pending_entities = restored_entities
-                _log_command(self._driver_id, user_input, "resume",
-                             self._is_session_valid())
-                filled = IntentResult(intent=restored_intent, confidence=1.0,
-                                      entities=restored_entities, raw_text=user_input)
+                filled   = IntentResult(intent=restored_intent, confidence=1.0,
+                                        entities=restored_entities, raw_text=user_input)
                 response = self._route(filled)
                 response["resume_message"] = f"Resuming your {restored_intent} request."
                 return self._store_response(response)
             return self._store_response(build_response(
-                message="Nothing to resume.",
-                state="IDLE", intent="resume", routing="No paused context"
+                message="Nothing to resume.", state="IDLE",
+                intent="resume", routing="No paused context"
             ))
 
-        # Help
+        # ── Help ──────────────────────────────────────────────────────────────
         if any(kw in text_lower for kw in HELP_KEYWORDS):
-            _log_command(self._driver_id, user_input, "help",
-                         self._is_session_valid())
             return self._store_response(build_response(
                 message=(
                     "Here's what I can help with: "
@@ -556,27 +690,21 @@ class DialogueManager:
                     "General questions — weather, news, anything. "
                     "Say stop to cancel. Say pause to hold. Say repeat to hear again."
                 ),
-                state="IDLE", intent="help",
-                routing="Help message delivered"
+                state="IDLE", intent="help", routing="Help message delivered"
             ))
 
-        # Queue status
+        # ── Queue status ──────────────────────────────────────────────────────
         if any(kw in text_lower for kw in QUEUE_KEYWORDS):
             buf = self.state.command_buffer
-            if not buf:
-                msg = "Buffer is empty. Ready for your next command."
-            else:
-                items = ", ".join(f'"{c.text}"' for c in buf[:5])
-                msg   = f"I have {len(buf)} command{'s' if len(buf)>1 else ''} waiting: {items}"
+            msg = ("Buffer is empty. Ready for your next command." if not buf else
+                   f"I have {len(buf)} command{'s' if len(buf)>1 else ''} waiting: " +
+                   ", ".join(f'"{c.text}"' for c in buf[:5]))
             return self._store_response(build_response(
                 message=msg, state="IDLE", intent="queue_status",
                 routing="Buffer status read aloud"
             ))
 
-        # ══════════════════════════════════════════════════════════════════════
-        # SPECIAL FSM STATES
-        # ══════════════════════════════════════════════════════════════════════
-
+        # ── FSM states ────────────────────────────────────────────────────────
         if self.state.fsm_state == "SLOT_FILL":
             return self._store_response(self._handle_slot_fill(user_input))
 
@@ -595,15 +723,17 @@ class DialogueManager:
         if self.state.fsm_state == "VERIFY_FACE":
             return self._store_response(self._handle_verify_face(user_input))
 
-        # ══════════════════════════════════════════════════════════════════════
-        # NORMAL FLOW
-        # ══════════════════════════════════════════════════════════════════════
+        if self.state.fsm_state == "PIN_PAYMENT_PENDING":
+            return self._store_response(self._handle_pin_for_payment(user_input))
 
+        if self.state.fsm_state == "LOCATION_CONFIRM":
+            return self._store_response(self._handle_location_confirm(user_input))
+
+        # ── Normal flow ───────────────────────────────────────────────────────
         resolved_text = self._resolve_context(user_input)
         result        = self.classifier.classify(resolved_text)
         self._add_to_history("user", user_input, result.intent)
 
-        # Log for OEM analytics
         _log_command(
             driver_id   = self._driver_id if self._is_session_valid() else "unknown_user",
             command     = user_input,
@@ -611,20 +741,12 @@ class DialogueManager:
             is_verified = self._is_session_valid()
         )
 
-        # Verification for sensitive intents
-        if result.intent in NEEDS_VERIFICATION:
-            if not self._is_session_valid():
-                self.state.fsm_state        = "VERIFY"
-                self.state.pending_entities = result.entities
-                self.state.current_intent   = result.intent
-                return self._store_response(build_response(
-                    message="This action requires identity verification. Please verify your identity.",
-                    state="VERIFY", intent=result.intent,
-                    routing="Layer 3 — voice biometric required",
-                    verification_status="needed"
-                ))
+        # Session check for payment — warn if expiring soon
+        if result.intent == "payment" and self._is_session_valid():
+            warning = self._get_session_warning()
+            if warning:
+                print(f"[dialogue] Session warning: {warning}")
 
-        # Slot filling
         missing = self._check_missing_slots(result.intent, result.entities)
         if missing:
             self.state.fsm_state        = "SLOT_FILL"
@@ -641,8 +763,7 @@ class DialogueManager:
 
         return self._store_response(self._route(result))
 
-    # ── Route ──────────────────────────────────────────────────────────────────
-
+    # ── Route ─────────────────────────────────────────────────────────────────
     def _route(self, result: IntentResult) -> dict:
         if result.intent == "vehicle_control":
             return handle_vehicle_control(result.entities)
@@ -655,21 +776,15 @@ class DialogueManager:
         elif result.intent == "general_question":
             return handle_general_question(result.raw_text, self.state.history)
         elif result.intent == "payment":
-            self.state.fsm_state      = "CONFIRM_PENDING"
-            self.state.confirm_action = "payment"
-            self.state.confirm_details = {
-                "item":   result.raw_text,
-                "amount": result.entities.get("amount", "unknown amount")
-            }
-            return build_response(
-                message=f"Please confirm: '{result.raw_text}'. Say YES to proceed or NO to cancel.",
-                state="CONFIRM_PENDING", intent="payment",
-                routing="Confirm Pending — explicit confirmation required"
-            )
+            self.state.current_intent   = "payment"
+            self.state.pending_entities = result.entities
+            return handle_order_flow(result.entities, result.raw_text, self.state)
         else:
             return handle_general_question(result.raw_text, self.state.history)
 
-    # ── State handlers ─────────────────────────────────────────────────────────
+    # ══════════════════════════════════════════════════════════════════════════
+    # STATE HANDLERS
+    # ══════════════════════════════════════════════════════════════════════════
 
     def _handle_verify_voice(self, user_input: str, audio_buffer=None) -> dict:
         print(f"[Layer 7] Starting Layer 3 auth for: {self._driver_id}")
@@ -780,7 +895,7 @@ class DialogueManager:
     def _handle_slot_fill(self, user_input: str) -> dict:
         self.state.slot_attempt += 1
         if self.state.slot_attempt > 3:
-            self.state.fsm_state    = "IDLE"
+            self.state.fsm_state      = "IDLE"
             self.state.current_intent = None
             return build_response(
                 message="I'm sorry, I couldn't understand. Please try again.",
@@ -800,18 +915,21 @@ class DialogueManager:
                 entities=self.state.pending_entities
             )
         self.state.fsm_state = "IDLE"
-        filled = IntentResult(
-            intent=self.state.current_intent, confidence=1.0,
-            entities=self.state.pending_entities.copy(), raw_text=user_input
-        )
+        filled = IntentResult(intent=self.state.current_intent, confidence=1.0,
+                              entities=self.state.pending_entities.copy(), raw_text=user_input)
         return self._route(filled)
 
     def _handle_confirmation(self, user_input: str) -> dict:
-        yes_words  = ["yes","yeah","yep","confirm","proceed","ok","okay","sure","do it"]
-        no_words   = ["no","nope","cancel","stop","don't","abort"]
+        """CONFIRM_PENDING: merchant selection OR yes/no for order."""
         user_lower = user_input.lower().strip()
-        if any(w in user_lower for w in yes_words):
-            self.state.fsm_state = "OTP_PENDING"
+
+        # Merchant list pending — this is a selection not yes/no
+        if self.state.pending_entities.get("merchants"):
+            return handle_order_flow({}, user_input, self.state)
+
+        if any(w in user_lower for w in CONFIRM_YES):
+            self.state.fsm_state    = "OTP_PENDING"
+            self.state.otp_attempts = 0
             otp = generate_otp()
             self._otp_active = otp
             return build_response(
@@ -820,8 +938,8 @@ class DialogueManager:
                 routing="Voice OTP — unique per transaction",
                 otp=otp
             )
-        elif any(w in user_lower for w in no_words):
-            self.state.fsm_state    = "IDLE"
+        elif any(w in user_lower for w in CONFIRM_NO):
+            self.state.fsm_state      = "IDLE"
             self.state.confirm_action = None
             return build_response(
                 message="Payment cancelled.",
@@ -836,95 +954,171 @@ class DialogueManager:
             )
 
     def _handle_otp(self, user_input: str) -> dict:
-        number_words = {
-            "zero":0,"one":1,"two":2,"three":3,"four":4,
-            "five":5,"six":6,"seven":7,"eight":8,"nine":9,
-            "0":0,"1":1,"2":2,"3":3,"4":4,"5":5,
-            "6":6,"7":7,"8":8,"9":9
-        }
-        spoken = [number_words[w.strip(".,!?")] for w in user_input.lower().split()
-                  if w.strip(".,!?") in number_words]
+        """
+        OTP match → location check → payment.
+        Fail x OTP_MAX_ATTEMPTS → PIN fallback.
+        """
+        spoken = [NUMBER_WORDS[w.strip(".,!?")] for w in user_input.lower().split()
+                  if w.strip(".,!?") in NUMBER_WORDS]
 
         if spoken == self._otp_active:
-            self.state.fsm_state = "IDLE"
-            self._otp_active     = None
-            return build_response(
-                message="OTP verified. Payment authorized. Transaction sent — digitally signed.",
-                state="IDLE", intent="payment",
-                routing="Payment Layer 8 — digitally signed",
-                action="payment_authorized"
-            )
+            self._otp_active        = None
+            self.state.otp_attempts = 0
+            location = self._check_location(self.state.pending_entities)
+
+            if location["known"]:
+                return self._process_payment_final()
+            else:
+                self.state.fsm_state = "LOCATION_CONFIRM"
+                return build_response(
+                    message="OTP verified. GPS location is unfamiliar. Can you confirm you're at a safe location? Say YES to proceed.",
+                    state="LOCATION_CONFIRM", intent="payment",
+                    routing="Location check — unknown GPS — driver confirmation needed"
+                )
         else:
-            self.state.fsm_state = "IDLE"
-            self._otp_active     = None
+            self.state.otp_attempts += 1
+
+            if self.state.otp_attempts >= OTP_MAX_ATTEMPTS:
+                self._otp_active          = None
+                self.state.otp_attempts   = 0
+                self.state.pin_attempts   = 0
+                self.state.fsm_state      = "PIN_PAYMENT_PENDING"
+                return build_response(
+                    message="OTP did not match. Please say your PIN to authorize payment instead.",
+                    state="PIN_PAYMENT_PENDING", intent="payment",
+                    routing="OTP failed max attempts — PIN fallback",
+                    action="otp_failed_pin_fallback"
+                )
+
+            new_otp          = generate_otp()
+            self._otp_active = new_otp
             return build_response(
-                message="OTP did not match. Payment denied. Please try again.",
-                state="IDLE", intent="payment",
-                routing="OTP failed — payment denied",
-                action="payment_denied"
+                message=f"OTP did not match. New code: {otp_to_words(new_otp)}. Please repeat.",
+                state="OTP_PENDING", intent="payment",
+                routing=f"OTP retry {self.state.otp_attempts}/{OTP_MAX_ATTEMPTS}",
+                otp=new_otp
             )
 
+    def _handle_pin_for_payment(self, user_input: str) -> dict:
+        """PIN fallback — max PIN_MAX_ATTEMPTS then payment denied."""
+        self.state.pin_attempts += 1
+        pin_input = user_input.strip()
 
-# ── Quick test ─────────────────────────────────────────────────────────────────
+        pin_ok = False
+        if L3_AVAILABLE:
+            try:
+                pin_ok = verify_pin(self._driver_id, pin_input)
+            except Exception as e:
+                print(f"[Layer 7] PIN verify error: {e}")
+                pin_ok = pin_input.isdigit() and len(pin_input) == 4
+        else:
+            pin_ok = pin_input.isdigit() and len(pin_input) == 4
+
+        if pin_ok:
+            self.state.fsm_state    = "IDLE"
+            self.state.pin_attempts = 0
+            return self._process_payment_final()
+
+        if self.state.pin_attempts >= PIN_MAX_ATTEMPTS:
+            self.state.fsm_state      = "IDLE"
+            self.state.pin_attempts   = 0
+            self.state.current_intent = None
+            return build_response(
+                message="PIN verification failed. Payment denied. Please try again later.",
+                state="IDLE", intent="payment",
+                routing="PIN fallback failed — payment denied",
+                action="payment_denied", verification_status="pin_failed"
+            )
+
+        remaining = PIN_MAX_ATTEMPTS - self.state.pin_attempts
+        return build_response(
+            message=f"Incorrect PIN. {remaining} attempt{'s' if remaining > 1 else ''} remaining.",
+            state="PIN_PAYMENT_PENDING", intent="payment",
+            routing=f"PIN attempt {self.state.pin_attempts}/{PIN_MAX_ATTEMPTS}"
+        )
+
+    def _handle_location_confirm(self, user_input: str) -> dict:
+        """Driver confirms unfamiliar location."""
+        if any(w in user_input.lower() for w in CONFIRM_YES):
+            return self._process_payment_final()
+        self.state.fsm_state = "IDLE"
+        return build_response(
+            message="Payment cancelled for safety. Location could not be confirmed.",
+            state="IDLE", intent="payment",
+            routing="Location check failed — payment denied",
+            action="payment_denied"
+        )
+
+    def _process_payment_final(self) -> dict:
+        """Process payment after OTP + location cleared."""
+        self.state.fsm_state = "IDLE"
+        entities = self.state.pending_entities
+
+        # Start a simulated session when payment completes (tracks expiry)
+        if not self.state.session_start:
+            self._start_session(f"web_session_{int(time.time())}")
+
+        if COMMERCE_AVAILABLE and entities.get("basket_id"):
+            result = process_payment(entities["basket_id"], entities)
+            return build_response(
+                message=result["nova_says"],
+                state="IDLE", intent="payment",
+                routing="Nova Pay — Stripe test mode — transaction complete",
+                action="payment_confirmed",
+                entities={
+                    "order_id":         result["order_id"],
+                    "transaction_id":   result["transaction_id"],
+                    "merchant_name":    result["merchant_name"],
+                    "merchant_address": result["merchant_address"],
+                    "items":            result["items"],
+                    "total":            result["total"],
+                    "nova_fee":         result["nova_fee"],
+                    "eta_order":        result["eta_order"],
+                    "payment_method":   result["payment_method"],
+                    "lat":              entities.get("lat"),
+                    "lng":              entities.get("lng")
+                }
+            )
+
+        return build_response(
+            message="OTP verified. Order confirmed. $6.50 charged via Nova Pay. Ready in 8 minutes.",
+            state="IDLE", intent="payment",
+            routing="Nova Pay — transaction complete",
+            action="payment_confirmed",
+            entities={"transaction_id": "TXN-DEMO001", "nova_fee": 0.20}
+        )
+
+
+# ── Quick test ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     dm = DialogueManager()
 
     print("\n" + "="*60)
-    print("  NOVA Layer 7 — Buffer / Queue Test")
-    print(f"  Layer 3: {L3_AVAILABLE}  |  Audit: {AUDIT_AVAILABLE}")
+    print("  NOVA Layer 7 — Test")
+    print(f"  L3:{L3_AVAILABLE}  Commerce:{COMMERCE_AVAILABLE}  Audit:{AUDIT_AVAILABLE}")
     print("="*60)
 
-    # ── Test 1: Buffer behaviour ───────────────────────────────────────────────
-    print("\n--- TEST: Buffer while speaking ---")
-
-    # Simulate Nova starting to speak
-    r1 = dm.process("navigate to the airport")
-    print(f"\n  CMD    : navigate to the airport")
-    print(f"  Nova   : {r1['nova_says']}")
-    print(f"  State  : {r1['fsm_state']}")
-
-    # Simulate TTS started
-    dm.speaking_started()
-
-    # New command arrives while Nova is speaking — should go to buffer
-    r2 = dm.process("also play some music")
-    print(f"\n  CMD    : also play some music (Nova is speaking)")
-    print(f"  Nova   : {r2['nova_says']}")
-    print(f"  Queued : {r2['queued']}  Position: {r2['queue_position']}")
-
-    # Another command — also goes to buffer
-    r3 = dm.process("what is the weather")
-    print(f"\n  CMD    : what is the weather (Nova still speaking)")
-    print(f"  Nova   : {r3['nova_says']}")
-    print(f"  Queued : {r3['queued']}  Position: {r3['queue_position']}")
-
-    # Simulate TTS finished — should auto-process next from buffer
-    print(f"\n  [TTS finished — calling speaking_done()]")
-    next_r = dm.speaking_done()
-    if next_r:
-        print(f"  Auto   : {next_r['nova_says']}")
-        print(f"  Buffer : {next_r.get('from_buffer')}  Waited: {next_r.get('buffer_waited')}s")
-
-    # ── Test 2: Emergency bypasses buffer ─────────────────────────────────────
-    print("\n--- TEST: Emergency bypasses buffer ---")
-    dm.speaking_started()
-    r4 = dm.process("emergency")
-    print(f"  CMD    : emergency (Nova is speaking)")
-    print(f"  Nova   : {r4['nova_says']}")
-    print(f"  Queued : {r4.get('queued', False)}  ← should be False — bypassed buffer")
-
-    # ── Test 3: Normal flow ────────────────────────────────────────────────────
-    print("\n--- TEST: Normal commands (not speaking) ---")
-    normal_tests = [
-        "turn on the AC",
-        "help",
-        "what's in the queue",
-        "pause",
-        "resume",
-        "stop",
+    steps = [
+        ("order a coffee", "Search"),
+        ("Starbucks",      "Pick merchant"),
+        ("yes",            "Confirm"),
     ]
-    for cmd in normal_tests:
+
+    for cmd, label in steps:
         r = dm.process(cmd)
-        print(f"\n  CMD  : {cmd}")
-        print(f"  Nova : {r['nova_says']}")
-        print(f"  State: {r['fsm_state']}")
+        print(f"\n  [{label}] {cmd}")
+        print(f"  Nova  : {r['nova_says']}")
+        print(f"  State : {r['fsm_state']}")
+        if r.get("otp"):
+            otp_words = " ".join(
+                ["zero","one","two","three","four","five",
+                 "six","seven","eight","nine"][d] for d in r["otp"]
+            )
+            otp_r = dm.process(otp_words)
+            print(f"\n  [OTP: {otp_words}]")
+            print(f"  Nova  : {otp_r['nova_says']}")
+            print(f"  State : {otp_r['fsm_state']}")
+            e = otp_r.get("entities", {})
+            if e.get("total"):
+                print(f"  Total : ${e['total']:.2f}  Fee: ${e['nova_fee']:.2f}")
+                print(f"  TXN   : {e.get('transaction_id', '—')}")

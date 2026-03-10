@@ -2,6 +2,13 @@
 NOVA Layer 7 - Intent Classifier
 Classifies user commands into categories.
 Runs on device, no internet, no AI model needed.
+
+UPDATES:
+- Food/drink ordering keywords added
+- Merchant name extraction (Starbucks, Subway etc)
+- Item name extraction (frappuccino, latte etc)
+- Improved payment patterns
+- Dollar + Rupee amount extraction
 """
 
 import re
@@ -47,25 +54,46 @@ INTENT_RULES = {
     ],
 
     "media": [
-        r"\bplay\b", r"\bpause\b", r"\bstop music\b",
+        r"\bplay\b", r"\bpause music\b", r"\bstop music\b",
         r"\bnext (song|track|music)\b", r"\bprevious (song|track)\b",
-        r"\bshuffle\b", r"\brepeat\b", r"\bskip\b",
+        r"\bshuffle\b", r"\bskip\b",
         r"\bspotify\b", r"\bmusic\b", r"\bsong\b",
         r"\bradio\b", r"\bpodcast\b", r"\bplaylist\b",
         r"\bvolume up\b", r"\bvolume down\b"
     ],
 
     "payment": [
+        # Action keywords
         r"\bpay\b", r"\border\b", r"\bbook\b", r"\bbuy\b",
         r"\bpurchase\b", r"\btransaction\b", r"\bcheckout\b",
-        r"\bcharge\b", r"\bfuel\b.*\bpay\b", r"\bpay.*\bfuel\b",
-        r"\bsend money\b", r"\btransfer\b"
+        r"\bcharge\b", r"\bsend money\b", r"\btransfer\b",
+        r"\bi want\b", r"\bget me\b", r"\bi('d| would) like\b",
+
+        # Food and drink
+        r"\bcoffee\b", r"\blatte\b", r"\bcappuccino\b",
+        r"\bespresso\b", r"\bfrappuccino\b", r"\bcold brew\b",
+        r"\btea\b", r"\bjuice\b", r"\bsmoothie\b",
+        r"\bsandwich\b", r"\bburger\b", r"\bpizza\b",
+        r"\bsub\b", r"\bwrap\b", r"\bsalad\b",
+        r"\bbreakfast\b", r"\blunch\b", r"\bdinner\b",
+        r"\bsnack\b", r"\bfood\b", r"\bmeal\b",
+        r"\bdrink\b", r"\bbeverage\b",
+
+        # Merchants
+        r"\bstarbucks\b", r"\bsubway\b", r"\bmcdonald(s)?\b",
+        r"\bpizza hut\b", r"\bdomino(s)?\b", r"\bkfc\b",
+        r"\bblu(e)? bottle\b", r"\bdunkin\b", r"\btim hortons\b",
+        r"\bchipotle\b", r"\bpanda express\b",
+
+        # Fuel and services
+        r"\bfuel\b", r"\bgas\b", r"\bpetrol\b",
+        r"\bparking\b.*\bpay\b", r"\bpay.*\bparking\b",
     ],
 
     "communication": [
         r"\bcall\b", r"\bphone\b", r"\bdial\b", r"\bring\b",
         r"\btext\b", r"\bsend.*message\b", r"\bwhatsapp\b",
-        r"\bemail\b", r"\bsms\b", r"\bmessage\b"
+        r"\bsms\b", r"\bmessage\b"
     ],
 
     "general_question": [
@@ -77,14 +105,34 @@ INTENT_RULES = {
 }
 
 
+# ── Known merchants and items for extraction ────────────────────────────────
+
+KNOWN_MERCHANTS = [
+    "starbucks", "subway", "mcdonalds", "mcdonald's",
+    "pizza hut", "dominos", "domino's", "kfc",
+    "blue bottle", "dunkin", "tim hortons",
+    "chipotle", "panda express", "shell", "bp"
+]
+
+KNOWN_ITEMS = [
+    "frappuccino", "caramel frappuccino", "mocha frappuccino",
+    "latte", "caramel latte", "vanilla latte",
+    "cappuccino", "espresso", "cold brew", "americano",
+    "flat white", "macchiato", "chai latte",
+    "veggie delight", "chicken teriyaki", "footlong",
+    "big mac", "whopper", "double double",
+    "sandwich", "burger", "pizza", "sub", "wrap",
+    "coffee", "tea", "juice", "smoothie"
+]
+
+
 # ── Entity extractors ───────────────────────────────────────────────────────
 
 def extract_entities(text: str, intent: str) -> dict:
-    entities = {}
+    entities  = {}
     text_lower = text.lower()
 
     if intent == "navigation":
-        # Extract destination — everything after "to" or "navigate"
         dest_match = re.search(
             r"(?:go to|navigate to|take me to|drive to|head to|route to|directions? to)\s+(.+)",
             text_lower
@@ -92,36 +140,77 @@ def extract_entities(text: str, intent: str) -> dict:
         if dest_match:
             entities["destination"] = dest_match.group(1).strip()
         else:
-            entities["destination"] = None  # missing — slot fill needed
+            entities["destination"] = None
 
     if intent == "vehicle_control":
-        # Extract what to control
-        controls = ["ac", "window", "heater", "fan", "lights", "seat", "wiper"]
+        controls = ["ac", "window", "heater", "fan",
+                    "lights", "seat", "wiper", "horn"]
         for control in controls:
             if control in text_lower:
                 entities["component"] = control
                 break
-        # Extract action
-        if any(w in text_lower for w in ["on", "open", "increase", "higher", "up"]):
+        if any(w in text_lower for w in
+               ["on", "open", "increase", "higher", "up"]):
             entities["action"] = "on"
-        elif any(w in text_lower for w in ["off", "close", "decrease", "lower", "down"]):
+        elif any(w in text_lower for w in
+                 ["off", "close", "decrease", "lower", "down"]):
             entities["action"] = "off"
 
     if intent == "media":
-        # Extract song/artist if mentioned
         play_match = re.search(r"play\s+(.+)", text_lower)
         if play_match:
             entities["query"] = play_match.group(1).strip()
 
     if intent == "payment":
-        # Extract amount if mentioned
-        amount_match = re.search(r"(?:rs\.?|rupees?|inr)?\s*(\d+)", text_lower)
-        if amount_match:
-            entities["amount"] = amount_match.group(1)
+        # ── Extract merchant name ────────────────────────────────────────
+        for merchant in KNOWN_MERCHANTS:
+            if merchant in text_lower:
+                entities["merchant"] = merchant
+                break
+
+        # ── Extract item name ────────────────────────────────────────────
+        # Try longest match first
+        for item in sorted(KNOWN_ITEMS, key=len, reverse=True):
+            if item in text_lower:
+                entities["item"] = item
+                break
+
+        # If no known item — try to extract after "order/get/buy/want"
+        if not entities.get("item"):
+            item_match = re.search(
+                r"(?:order|get me|buy|i want|i'd like|give me)\s+(?:a\s+|an\s+)?(.+?)(?:\s+from|\s+at|\s+near|$)",
+                text_lower
+            )
+            if item_match:
+                entities["item"] = item_match.group(1).strip()
+
+        # ── Extract amount ───────────────────────────────────────────────
+        # Dollar amounts
+        dollar_match = re.search(r"\$\s*(\d+(?:\.\d{1,2})?)", text_lower)
+        if dollar_match:
+            entities["amount"] = dollar_match.group(1)
+
+        # Rupee amounts
+        if not entities.get("amount"):
+            rupee_match = re.search(
+                r"(?:rs\.?|rupees?|inr)?\s*(\d+)", text_lower
+            )
+            if rupee_match:
+                entities["amount"] = rupee_match.group(1)
+
+        # ── Build query for merchant search ─────────────────────────────
+        # Combine merchant + item as search query
+        if entities.get("merchant") and entities.get("item"):
+            entities["query"] = f"{entities['item']} from {entities['merchant']}"
+        elif entities.get("merchant"):
+            entities["query"] = entities["merchant"]
+        elif entities.get("item"):
+            entities["query"] = entities["item"]
 
     if intent == "communication":
-        # Extract contact name
-        call_match = re.search(r"(?:call|phone|text|message)\s+(.+)", text_lower)
+        call_match = re.search(
+            r"(?:call|phone|text|message|dial|ring)\s+(.+)", text_lower
+        )
         if call_match:
             entities["contact"] = call_match.group(1).strip()
 
@@ -134,16 +223,17 @@ class IntentClassifier:
 
     def classify(self, text: str) -> IntentResult:
         text_clean = text.strip().lower()
-        scores: dict[str, float] = {} 
+        scores: dict[str, float] = {}
 
         for intent, patterns in INTENT_RULES.items():
-            match_count = sum(1 for pattern in patterns if re.search(pattern, text_clean))
+            match_count = sum(
+                1 for pattern in patterns
+                if re.search(pattern, text_clean)
+            )
             if match_count > 0:
-                # normalize score — more matches = more confident
                 scores[intent] = min(float(match_count) / 3.0, 1.0)
 
         if not scores:
-            # nothing matched — treat as general question
             return IntentResult(
                 intent="general_question",
                 confidence=0.5,
@@ -151,14 +241,13 @@ class IntentClassifier:
                 raw_text=text
             )
 
-        # pick highest scoring intent
         best_intent = max(scores, key=lambda k: scores[k])
-        confidence = scores[best_intent]
+        confidence  = scores[best_intent]
 
-        # stop always wins regardless of score
+        # stop always wins
         if "stop" in scores:
             best_intent = "stop"
-            confidence = 1.0
+            confidence  = 1.0
 
         entities = extract_entities(text, best_intent)
 
@@ -176,21 +265,28 @@ if __name__ == "__main__":
     classifier = IntentClassifier()
 
     test_commands = [
+        # Original tests
         "turn on the AC",
         "navigate to the airport",
         "play some relaxing music",
-        "order a coffee",
-        "what is the weather today",
         "call mom",
         "stop",
-        "take me to Hyderabad",
-        "increase the volume",
-        "pay for fuel",
+        "what is the weather today",
+
+        # New food ordering tests
+        "order a frappuccino from Starbucks",
+        "I want a caramel latte",
+        "get me a coffee",
+        "order from Subway",
+        "I'd like an espresso",
+        "buy me a cold brew from Blue Bottle",
+        "order food",
+        "I want a veggie delight from Subway",
     ]
 
-    print("\n" + "="*55)
+    print("\n" + "="*60)
     print("  NOVA Layer 7 — Intent Classifier Test")
-    print("="*55)
+    print("="*60)
 
     for cmd in test_commands:
         result = classifier.classify(cmd)
@@ -198,4 +294,4 @@ if __name__ == "__main__":
         print(f"  Intent   : {result.intent}")
         print(f"  Confidence: {result.confidence}")
         print(f"  Entities : {result.entities}")
-        print("  " + "-"*50)
+        print("  " + "-"*55)
