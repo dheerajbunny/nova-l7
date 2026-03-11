@@ -1,642 +1,1609 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>NOVA — Layer 7 Dialogue Manager</title>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-<style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NOVA — In-Car AI Assistant</title>
+  <link
+    href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=Space+Mono:wght@400;700&display=swap"
+    rel="stylesheet">
+  <style>
+    :root {
+      --bg: #080b12;
+      --surface: #0d1220;
+      --surface2: #111827;
+      --border: rgba(255, 255, 255, 0.06);
+      --accent: #00d4ff;
+      --accent2: #7c3aed;
+      --green: #00e5a0;
+      --yellow: #ffc94d;
+      --red: #ff4d6a;
+      --text: #f0f4ff;
+      --muted: #4a5568;
+      --muted2: #2d3748;
+    }
 
-  body {
-    background: #0f1117;
-    font-family: 'Inter', sans-serif;
-    color: #e2e8f0;
-    min-height: 100vh;
-    display: flex;
-    flex-direction: column;
-  }
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
 
-  /* ── Header ── */
-  .header {
-    background: #1a1d27;
-    border-bottom: 1px solid #2d3148;
-    padding: 16px 32px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-  }
-  .header-left { display: flex; align-items: center; gap: 12px; }
-  .logo {
-    font-size: 22px; font-weight: 700; color: #fff;
-    letter-spacing: -0.5px;
-  }
-  .logo span { color: #6366f1; }
-  .badge {
-    font-size: 10px; font-weight: 600; letter-spacing: 0.08em;
-    padding: 3px 10px; border-radius: 20px;
-    text-transform: uppercase;
-  }
-  .badge-layer { background: rgba(99,102,241,0.15); color: #818cf8; border: 1px solid rgba(99,102,241,0.3); }
-  .badge-live  { background: rgba(34,197,94,0.15);  color: #4ade80;  border: 1px solid rgba(34,197,94,0.3); }
+    body {
+      background: var(--bg);
+      font-family: 'Syne', sans-serif;
+      color: var(--text);
+      min-height: 100vh;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
 
-  .session-indicator {
-    display: flex; align-items: center; gap: 8px;
-    font-size: 12px; color: #64748b;
-    font-family: 'JetBrains Mono', monospace;
-  }
-  .session-dot {
-    width: 8px; height: 8px; border-radius: 50%;
-    background: #ef4444;
-    transition: background 0.3s;
-  }
-  .session-dot.active { background: #4ade80; animation: pulse 2s infinite; }
-  @keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.4; }
-  }
+    /* Ambient background */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background:
+        radial-gradient(ellipse 60% 40% at 20% 50%, rgba(0, 212, 255, 0.04) 0%, transparent 70%),
+        radial-gradient(ellipse 40% 60% at 80% 30%, rgba(124, 58, 237, 0.04) 0%, transparent 70%);
+      pointer-events: none;
+      z-index: 0;
+    }
 
-  /* ── Main layout ── */
-  .main {
-    display: grid;
-    grid-template-columns: 1fr 380px;
-    gap: 0;
-    flex: 1;
-    overflow: hidden;
-    height: calc(100vh - 61px);
-  }
+    /* ── Header ── */
+    .header {
+      position: relative;
+      z-index: 10;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 14px 28px;
+      border-bottom: 1px solid var(--border);
+      background: rgba(8, 11, 18, 0.95);
+      backdrop-filter: blur(20px);
+    }
 
-  /* ── Chat area ── */
-  .chat-area {
-    display: flex;
-    flex-direction: column;
-    border-right: 1px solid #2d3148;
-  }
+    .logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
 
-  .messages {
-    flex: 1;
-    overflow-y: auto;
-    padding: 24px 28px;
-    display: flex;
-    flex-direction: column;
-    gap: 16px;
-  }
-  .messages::-webkit-scrollbar { width: 4px; }
-  .messages::-webkit-scrollbar-track { background: transparent; }
-  .messages::-webkit-scrollbar-thumb { background: #2d3148; border-radius: 2px; }
+    .logo-icon {
+      width: 34px;
+      height: 34px;
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 16px;
+    }
 
-  /* Message bubbles */
-  .msg { display: flex; gap: 12px; max-width: 85%; }
-  .msg.user { align-self: flex-end; flex-direction: row-reverse; }
-  .msg.nova { align-self: flex-start; }
+    .logo-text {
+      font-size: 18px;
+      font-weight: 800;
+      letter-spacing: 0.1em;
+      color: var(--text);
+    }
 
-  .msg-avatar {
-    width: 32px; height: 32px; border-radius: 50%;
-    display: flex; align-items: center; justify-content: center;
-    font-size: 14px; flex-shrink: 0;
-  }
-  .msg.user .msg-avatar { background: #6366f1; }
-  .msg.nova .msg-avatar { background: #1e293b; border: 1px solid #334155; }
+    .logo-sub {
+      font-size: 10px;
+      font-weight: 400;
+      color: var(--muted);
+      font-family: 'Space Mono', monospace;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+      margin-top: 1px;
+    }
 
-  .msg-content { display: flex; flex-direction: column; gap: 4px; }
-  .msg.user .msg-content { align-items: flex-end; }
+    .header-center {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
 
-  .msg-bubble {
-    padding: 10px 14px; border-radius: 12px;
-    font-size: 14px; line-height: 1.5;
-    max-width: 100%;
-  }
-  .msg.user .msg-bubble {
-    background: #6366f1; color: #fff;
-    border-bottom-right-radius: 4px;
-  }
-  .msg.nova .msg-bubble {
-    background: #1e293b; color: #e2e8f0;
-    border: 1px solid #334155;
-    border-bottom-left-radius: 4px;
-  }
+    .pill {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 12px;
+      border-radius: 20px;
+      font-size: 11px;
+      font-weight: 600;
+      font-family: 'Space Mono', monospace;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
 
-  .msg-meta {
-    font-size: 10px; color: #475569;
-    font-family: 'JetBrains Mono', monospace;
-  }
+    .pill-layer {
+      background: rgba(0, 212, 255, 0.08);
+      color: var(--accent);
+      border: 1px solid rgba(0, 212, 255, 0.2);
+    }
 
-  /* State tag on nova message */
-  .msg-state {
-    display: inline-flex; align-items: center; gap: 5px;
-    font-size: 10px; font-weight: 600; letter-spacing: 0.06em;
-    padding: 2px 8px; border-radius: 4px;
-    text-transform: uppercase; margin-top: 2px;
-  }
+    .pill-live {
+      background: rgba(0, 229, 160, 0.08);
+      color: var(--green);
+      border: 1px solid rgba(0, 229, 160, 0.2);
+    }
 
-  /* ── Input area ── */
-  .input-area {
-    padding: 16px 28px 20px;
-    border-top: 1px solid #2d3148;
-    background: #0f1117;
-  }
+    .pill-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: currentColor;
+      animation: blink 2s infinite;
+    }
 
-  .input-row {
-    display: flex; gap: 10px; align-items: center;
-  }
+    @keyframes blink {
 
-  .input-box {
-    flex: 1;
-    background: #1e293b;
-    border: 1px solid #334155;
-    border-radius: 10px;
-    padding: 12px 16px;
-    font-size: 14px; color: #e2e8f0;
-    font-family: 'Inter', sans-serif;
-    outline: none;
-    transition: border-color 0.2s;
-  }
-  .input-box:focus { border-color: #6366f1; }
-  .input-box::placeholder { color: #475569; }
+      0%,
+      100% {
+        opacity: 1
+      }
 
-  .send-btn {
-    background: #6366f1; color: #fff;
-    border: none; border-radius: 10px;
-    padding: 12px 20px; font-size: 14px; font-weight: 600;
-    cursor: pointer; transition: background 0.2s;
-    font-family: 'Inter', sans-serif;
-    white-space: nowrap;
-  }
-  .send-btn:hover { background: #4f46e5; }
-  .send-btn:active { transform: scale(0.98); }
+      50% {
+        opacity: 0.3
+      }
+    }
 
-  .quick-cmds {
-    display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px;
-  }
-  .quick-btn {
-    background: #1e293b; border: 1px solid #334155;
-    border-radius: 6px; padding: 5px 10px;
-    font-size: 11px; color: #94a3b8; cursor: pointer;
-    transition: all 0.15s; font-family: 'Inter', sans-serif;
-  }
-  .quick-btn:hover { border-color: #6366f1; color: #a5b4fc; }
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
 
-  /* ── Side panel ── */
-  .side-panel {
-    display: flex; flex-direction: column;
-    background: #0f1117; overflow-y: auto;
-    padding: 20px;
-    gap: 16px;
-  }
-  .side-panel::-webkit-scrollbar { width: 4px; }
-  .side-panel::-webkit-scrollbar-thumb { background: #2d3148; border-radius: 2px; }
+    .session-timer {
+      font-family: 'Space Mono', monospace;
+      font-size: 12px;
+      color: var(--muted);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
 
-  .panel-section {
-    background: #1a1d27;
-    border: 1px solid #2d3148;
-    border-radius: 12px;
-    overflow: hidden;
-  }
+    .session-timer.active {
+      color: var(--green);
+    }
 
-  .panel-header {
-    padding: 10px 14px;
-    border-bottom: 1px solid #2d3148;
-    font-size: 10px; font-weight: 600;
-    letter-spacing: 0.12em; text-transform: uppercase;
-    color: #64748b;
-    display: flex; align-items: center; gap: 6px;
-  }
+    .session-timer.warning {
+      color: var(--yellow);
+    }
 
-  .panel-body { padding: 14px; }
+    /* ── Main layout ── */
+    .main {
+      position: relative;
+      z-index: 1;
+      flex: 1;
+      display: grid;
+      grid-template-columns: 1fr 340px;
+      overflow: hidden;
+      height: calc(100vh - 62px);
+    }
 
-  /* FSM state display */
-  .fsm-state {
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 20px; font-weight: 700;
-    text-align: center; padding: 12px;
-    border-radius: 8px; letter-spacing: 0.05em;
-    transition: all 0.3s;
-  }
+    /* ── Left: Screen area ── */
+    .screen-area {
+      display: flex;
+      flex-direction: column;
+      border-right: 1px solid var(--border);
+      overflow: hidden;
+    }
 
-  /* Intent display */
-  .intent-badge {
-    display: flex; align-items: center; gap: 8px;
-    padding: 10px 12px; border-radius: 8px;
-    font-size: 13px; font-weight: 600;
-    margin-bottom: 8px;
-    transition: all 0.3s;
-  }
-  .intent-icon { font-size: 18px; }
+    /* Nova voice display */
+    .nova-voice {
+      padding: 28px 32px 20px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 20px;
+    }
 
-  /* Routing display */
-  .routing-text {
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 11px; color: #94a3b8;
-    line-height: 1.6; padding: 10px 12px;
-    background: #0f1117; border-radius: 6px;
-  }
+    .nova-orb {
+      width: 56px;
+      height: 56px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      background: radial-gradient(circle at 35% 35%, rgba(0, 212, 255, 0.6), rgba(124, 58, 237, 0.4));
+      border: 2px solid rgba(0, 212, 255, 0.3);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 22px;
+      box-shadow: 0 0 24px rgba(0, 212, 255, 0.15);
+      transition: all 0.3s;
+      position: relative;
+    }
 
-  /* Entities */
-  .entity-row {
-    display: flex; justify-content: space-between;
-    align-items: center; padding: 6px 0;
-    border-bottom: 1px solid #2d3148; font-size: 12px;
-  }
-  .entity-row:last-child { border-bottom: none; }
-  .entity-key { color: #64748b; font-family: 'JetBrains Mono', monospace; }
-  .entity-val { color: #a5b4fc; font-weight: 500; }
+    .nova-orb.speaking {
+      box-shadow: 0 0 40px rgba(0, 212, 255, 0.4);
+      animation: orb-pulse 1.2s ease-in-out infinite;
+    }
 
-  /* Security layer */
-  .security-item {
-    display: flex; align-items: center; gap: 8px;
-    padding: 7px 0; font-size: 12px;
-    border-bottom: 1px solid #2d3148;
-  }
-  .security-item:last-child { border-bottom: none; }
-  .security-icon { font-size: 14px; width: 20px; text-align: center; }
-  .security-label { color: #94a3b8; flex: 1; }
-  .security-status { font-size: 10px; font-weight: 600; padding: 2px 7px; border-radius: 4px; }
-  .status-ok  { background: rgba(34,197,94,0.15); color: #4ade80; }
-  .status-pending { background: rgba(251,191,36,0.15); color: #fbbf24; }
-  .status-fail { background: rgba(239,68,68,0.15); color: #f87171; }
+    @keyframes orb-pulse {
 
-  /* OTP display */
-  .otp-display {
-    display: flex; gap: 8px; justify-content: center;
-    padding: 12px 0;
-  }
-  .otp-digit {
-    width: 44px; height: 52px;
-    background: #0f1117; border: 2px solid #6366f1;
-    border-radius: 8px; display: flex; align-items: center;
-    justify-content: center; font-size: 22px; font-weight: 700;
-    font-family: 'JetBrains Mono', monospace; color: #818cf8;
-    transition: all 0.3s;
-  }
-  .otp-hidden { border-color: #334155; color: #334155; }
+      0%,
+      100% {
+        transform: scale(1);
+        box-shadow: 0 0 24px rgba(0, 212, 255, 0.3);
+      }
 
-  /* Color themes */
-  .state-idle     { background: rgba(30,41,59,0.8); color: #94a3b8; }
-  .state-verify   { background: rgba(251,191,36,0.1); color: #fbbf24; border: 1px solid rgba(251,191,36,0.3); }
-  .state-processing { background: rgba(99,102,241,0.1); color: #818cf8; border: 1px solid rgba(99,102,241,0.3); }
-  .state-slot     { background: rgba(251,146,60,0.1); color: #fb923c; border: 1px solid rgba(251,146,60,0.3); }
-  .state-confirm  { background: rgba(251,191,36,0.1); color: #fbbf24; border: 1px solid rgba(251,191,36,0.3); }
-  .state-otp      { background: rgba(168,85,247,0.1); color: #c084fc; border: 1px solid rgba(168,85,247,0.3); }
+      50% {
+        transform: scale(1.06);
+        box-shadow: 0 0 48px rgba(0, 212, 255, 0.5);
+      }
+    }
 
-  .intent-vehicle  { background: rgba(56,189,248,0.1); color: #38bdf8; }
-  .intent-navigation { background: rgba(52,211,153,0.1); color: #34d399; }
-  .intent-media    { background: rgba(168,85,247,0.1); color: #c084fc; }
-  .intent-payment  { background: rgba(251,146,60,0.1); color: #fb923c; }
-  .intent-question { background: rgba(99,102,241,0.1); color: #818cf8; }
-  .intent-stop     { background: rgba(239,68,68,0.1); color: #f87171; }
-  .intent-communication { background: rgba(34,197,94,0.1); color: #4ade80; }
-  .intent-unknown  { background: rgba(100,116,139,0.1); color: #94a3b8; }
+    .nova-speech {
+      flex: 1;
+    }
 
-  /* Welcome message */
-  .welcome {
-    text-align: center; padding: 40px 20px;
-    color: #475569;
-  }
-  .welcome h2 { font-size: 18px; color: #64748b; margin-bottom: 8px; }
-  .welcome p { font-size: 13px; line-height: 1.6; }
+    .nova-label {
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+      color: var(--accent);
+      font-family: 'Space Mono', monospace;
+      margin-bottom: 6px;
+    }
 
-  /* Empty state for panel */
-  .empty-state {
-    text-align: center; padding: 16px;
-    color: #475569; font-size: 12px;
-  }
-</style>
+    .nova-text {
+      font-size: 17px;
+      font-weight: 500;
+      line-height: 1.5;
+      color: var(--text);
+      min-height: 26px;
+    }
+
+    .nova-text.empty {
+      color: var(--muted);
+      font-size: 14px;
+      font-style: italic;
+    }
+
+    .waveform {
+      display: flex;
+      align-items: center;
+      gap: 2px;
+      height: 20px;
+    }
+
+    .wave-bar {
+      width: 3px;
+      border-radius: 2px;
+      background: var(--accent);
+      opacity: 0.4;
+      animation: none;
+    }
+
+    .wave-bar.active {
+      opacity: 1;
+    }
+
+    .wave-bar.active:nth-child(1) {
+      animation: wave 1s ease-in-out infinite 0s;
+    }
+
+    .wave-bar.active:nth-child(2) {
+      animation: wave 1s ease-in-out infinite 0.1s;
+    }
+
+    .wave-bar.active:nth-child(3) {
+      animation: wave 1s ease-in-out infinite 0.2s;
+    }
+
+    .wave-bar.active:nth-child(4) {
+      animation: wave 1s ease-in-out infinite 0.3s;
+    }
+
+    .wave-bar.active:nth-child(5) {
+      animation: wave 1s ease-in-out infinite 0.2s;
+    }
+
+    .wave-bar.active:nth-child(6) {
+      animation: wave 1s ease-in-out infinite 0.1s;
+    }
+
+    .wave-bar.active:nth-child(7) {
+      animation: wave 1s ease-in-out infinite 0s;
+    }
+
+    @keyframes wave {
+
+      0%,
+      100% {
+        height: 4px;
+      }
+
+      50% {
+        height: 18px;
+      }
+    }
+
+    /* ── Screens ── */
+    .screens {
+      flex: 1;
+      overflow: hidden;
+      position: relative;
+    }
+
+    .screen {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      padding: 24px 32px;
+      opacity: 0;
+      pointer-events: none;
+      transform: translateY(10px);
+      transition: all 0.3s ease;
+    }
+
+    .screen.active {
+      opacity: 1;
+      pointer-events: all;
+      transform: translateY(0);
+    }
+
+    .screen-title {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: var(--muted);
+      font-family: 'Space Mono', monospace;
+      margin-bottom: 16px;
+    }
+
+    /* ── IDLE screen ── */
+    #screen-idle {
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      gap: 24px;
+    }
+
+    .idle-orb {
+      width: 120px;
+      height: 120px;
+      border-radius: 50%;
+      background: radial-gradient(circle at 35% 35%, rgba(0, 212, 255, 0.15), rgba(124, 58, 237, 0.1));
+      border: 1px solid rgba(0, 212, 255, 0.15);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 48px;
+      position: relative;
+    }
+
+    .idle-orb::after {
+      content: '';
+      position: absolute;
+      inset: -8px;
+      border-radius: 50%;
+      border: 1px solid rgba(0, 212, 255, 0.08);
+    }
+
+    .idle-title {
+      font-size: 28px;
+      font-weight: 800;
+      background: linear-gradient(135deg, var(--text), rgba(255, 255, 255, 0.5));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .idle-sub {
+      font-size: 14px;
+      color: var(--muted);
+      line-height: 1.6;
+      max-width: 340px;
+    }
+
+    .quick-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      justify-content: center;
+      max-width: 480px;
+    }
+
+    .qa-btn {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 8px 16px;
+      font-size: 12px;
+      color: #94a3b8;
+      cursor: pointer;
+      transition: all 0.15s;
+      font-family: 'Syne', sans-serif;
+      font-weight: 500;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .qa-btn:hover {
+      border-color: var(--accent);
+      color: var(--accent);
+      background: rgba(0, 212, 255, 0.05);
+    }
+
+    /* ── MERCHANT screen ── */
+    #screen-merchant {
+      gap: 12px;
+      overflow-y: auto;
+    }
+
+    .merchant-card {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 16px 20px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      cursor: pointer;
+      transition: all 0.2s;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .merchant-card:hover {
+      border-color: var(--accent);
+      background: rgba(0, 212, 255, 0.04);
+      transform: translateX(4px);
+    }
+
+    .merchant-card.selected {
+      border-color: var(--accent);
+      background: rgba(0, 212, 255, 0.06);
+    }
+
+    .merchant-icon {
+      width: 48px;
+      height: 48px;
+      border-radius: 12px;
+      background: linear-gradient(135deg, rgba(0, 212, 255, 0.15), rgba(124, 58, 237, 0.15));
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 22px;
+      flex-shrink: 0;
+    }
+
+    .merchant-info {
+      flex: 1;
+    }
+
+    .merchant-name {
+      font-size: 15px;
+      font-weight: 700;
+      margin-bottom: 4px;
+    }
+
+    .merchant-meta {
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .merchant-dist {
+      font-family: 'Space Mono', monospace;
+      font-size: 12px;
+      color: var(--accent);
+      font-weight: 700;
+    }
+
+    .merchant-num {
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      background: rgba(0, 212, 255, 0.1);
+      border: 1px solid rgba(0, 212, 255, 0.2);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--accent);
+      font-family: 'Space Mono', monospace;
+      flex-shrink: 0;
+    }
+
+    /* ── ORDER CONFIRM screen ── */
+    #screen-confirm {
+      gap: 16px;
+    }
+
+    .order-card {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 20px 24px;
+    }
+
+    .order-header {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      margin-bottom: 16px;
+      padding-bottom: 16px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .order-merchant-icon {
+      width: 44px;
+      height: 44px;
+      border-radius: 10px;
+      background: linear-gradient(135deg, rgba(0, 212, 255, 0.2), rgba(124, 58, 237, 0.2));
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 20px;
+    }
+
+    .order-merchant-name {
+      font-size: 16px;
+      font-weight: 700;
+    }
+
+    .order-merchant-addr {
+      font-size: 12px;
+      color: var(--muted);
+      margin-top: 2px;
+    }
+
+    .order-item-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 8px 0;
+      font-size: 14px;
+    }
+
+    .order-item-row.total {
+      border-top: 1px solid var(--border);
+      margin-top: 8px;
+      padding-top: 14px;
+      font-weight: 700;
+      font-size: 16px;
+    }
+
+    .order-item-row .label {
+      color: #94a3b8;
+    }
+
+    .order-item-row .val {
+      font-weight: 600;
+    }
+
+    .order-item-row.total .val {
+      color: var(--accent);
+      font-size: 20px;
+    }
+
+    .nova-fee-note {
+      font-size: 10px;
+      color: var(--muted);
+      font-family: 'Space Mono', monospace;
+    }
+
+    .confirm-actions {
+      display: flex;
+      gap: 12px;
+    }
+
+    .btn {
+      flex: 1;
+      padding: 14px 20px;
+      border-radius: 12px;
+      font-size: 14px;
+      font-weight: 700;
+      cursor: pointer;
+      border: none;
+      font-family: 'Syne', sans-serif;
+      transition: all 0.2s;
+      letter-spacing: 0.03em;
+    }
+
+    .btn-confirm {
+      background: linear-gradient(135deg, var(--accent), #0099cc);
+      color: #000;
+    }
+
+    .btn-confirm:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 8px 24px rgba(0, 212, 255, 0.3);
+    }
+
+    .btn-cancel {
+      background: rgba(255, 77, 106, 0.1);
+      color: var(--red);
+      border: 1px solid rgba(255, 77, 106, 0.2);
+    }
+
+    .btn-cancel:hover {
+      background: rgba(255, 77, 106, 0.2);
+    }
+
+    /* ── OTP screen ── */
+    #screen-otp {
+      align-items: center;
+      justify-content: center;
+      gap: 28px;
+      text-align: center;
+    }
+
+    .otp-instruction {
+      font-size: 14px;
+      color: var(--muted);
+      line-height: 1.6;
+      max-width: 320px;
+    }
+
+    .otp-digits {
+      display: flex;
+      gap: 12px;
+    }
+
+    .otp-digit {
+      width: 64px;
+      height: 72px;
+      border-radius: 14px;
+      background: var(--surface2);
+      border: 2px solid rgba(0, 212, 255, 0.3);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 32px;
+      font-weight: 700;
+      font-family: 'Space Mono', monospace;
+      color: var(--accent);
+      box-shadow: 0 0 16px rgba(0, 212, 255, 0.1);
+      animation: digit-glow 2s ease-in-out infinite;
+    }
+
+    @keyframes digit-glow {
+
+      0%,
+      100% {
+        box-shadow: 0 0 16px rgba(0, 212, 255, 0.1);
+      }
+
+      50% {
+        box-shadow: 0 0 32px rgba(0, 212, 255, 0.25);
+      }
+    }
+
+    .otp-word-hint {
+      font-family: 'Space Mono', monospace;
+      font-size: 13px;
+      color: #7c3aed;
+      background: rgba(124, 58, 237, 0.1);
+      border: 1px solid rgba(124, 58, 237, 0.2);
+      padding: 10px 24px;
+      border-radius: 8px;
+      letter-spacing: 0.1em;
+    }
+
+    .otp-attempts {
+      font-size: 12px;
+      color: var(--muted);
+      font-family: 'Space Mono', monospace;
+    }
+
+    /* ── SUCCESS screen ── */
+    #screen-success {
+      align-items: center;
+      justify-content: center;
+      gap: 20px;
+      text-align: center;
+    }
+
+    .success-icon {
+      width: 80px;
+      height: 80px;
+      border-radius: 50%;
+      background: rgba(0, 229, 160, 0.1);
+      border: 2px solid rgba(0, 229, 160, 0.3);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 36px;
+      animation: success-pop 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+    }
+
+    @keyframes success-pop {
+      0% {
+        transform: scale(0);
+        opacity: 0;
+      }
+
+      100% {
+        transform: scale(1);
+        opacity: 1;
+      }
+    }
+
+    .success-title {
+      font-size: 24px;
+      font-weight: 800;
+      color: var(--green);
+    }
+
+    .success-amount {
+      font-size: 40px;
+      font-weight: 800;
+      font-family: 'Space Mono', monospace;
+      background: linear-gradient(135deg, var(--green), var(--accent));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .success-details {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 16px 24px;
+      width: 100%;
+      max-width: 320px;
+    }
+
+    .success-row {
+      display: flex;
+      justify-content: space-between;
+      font-size: 12px;
+      padding: 5px 0;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .success-row:last-child {
+      border-bottom: none;
+    }
+
+    .success-row .sk {
+      color: var(--muted);
+      font-family: 'Space Mono', monospace;
+    }
+
+    .success-row .sv {
+      color: var(--text);
+      font-weight: 600;
+    }
+
+    .eta-badge {
+      background: rgba(0, 229, 160, 0.1);
+      border: 1px solid rgba(0, 229, 160, 0.2);
+      color: var(--green);
+      padding: 8px 20px;
+      border-radius: 20px;
+      font-size: 14px;
+      font-weight: 700;
+    }
+
+    /* ── PIN screen ── */
+    #screen-pin {
+      align-items: center;
+      justify-content: center;
+      gap: 24px;
+      text-align: center;
+    }
+
+    .pin-icon {
+      width: 64px;
+      height: 64px;
+      border-radius: 50%;
+      background: rgba(255, 201, 77, 0.1);
+      border: 2px solid rgba(255, 201, 77, 0.3);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 28px;
+    }
+
+    .pin-title {
+      font-size: 18px;
+      font-weight: 700;
+    }
+
+    .pin-sub {
+      font-size: 13px;
+      color: var(--muted);
+      max-width: 280px;
+      line-height: 1.6;
+    }
+
+    .pin-dots {
+      display: flex;
+      gap: 10px;
+    }
+
+    .pin-dot {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: var(--muted2);
+      border: 2px solid var(--muted);
+      transition: all 0.2s;
+    }
+
+    .pin-dot.filled {
+      background: var(--yellow);
+      border-color: var(--yellow);
+    }
+
+    /* ── Input ── */
+    .input-zone {
+      padding: 16px 28px 20px;
+      border-top: 1px solid var(--border);
+      background: rgba(8, 11, 18, 0.9);
+      backdrop-filter: blur(10px);
+    }
+
+    .input-row {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+
+    .input-field {
+      flex: 1;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px 16px;
+      font-size: 14px;
+      color: var(--text);
+      font-family: 'Syne', sans-serif;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+
+    .input-field:focus {
+      border-color: var(--accent);
+    }
+
+    .input-field::placeholder {
+      color: var(--muted);
+    }
+
+    .send-btn {
+      background: linear-gradient(135deg, var(--accent), #0099cc);
+      color: #000;
+      border: none;
+      border-radius: 10px;
+      padding: 12px 20px;
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+      font-family: 'Syne', sans-serif;
+      transition: all 0.2s;
+      white-space: nowrap;
+      letter-spacing: 0.05em;
+    }
+
+    .send-btn:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 6px 20px rgba(0, 212, 255, 0.3);
+    }
+
+    /* ── Right panel ── */
+    .right-panel {
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+      overflow-y: auto;
+      background: var(--surface);
+    }
+
+    .right-panel::-webkit-scrollbar {
+      width: 3px;
+    }
+
+    .right-panel::-webkit-scrollbar-thumb {
+      background: var(--muted2);
+    }
+
+    .rp-section {
+      border-bottom: 1px solid var(--border);
+      padding: 16px;
+    }
+
+    .rp-label {
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: var(--muted);
+      font-family: 'Space Mono', monospace;
+      margin-bottom: 10px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    /* State pill */
+    .state-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 14px;
+      border-radius: 20px;
+      font-family: 'Space Mono', monospace;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      transition: all 0.3s;
+    }
+
+    .state-IDLE {
+      background: rgba(74, 85, 104, 0.2);
+      color: #718096;
+      border: 1px solid rgba(74, 85, 104, 0.3);
+    }
+
+    .state-CONFIRM_PENDING {
+      background: rgba(255, 201, 77, 0.1);
+      color: var(--yellow);
+      border: 1px solid rgba(255, 201, 77, 0.3);
+    }
+
+    .state-OTP_PENDING {
+      background: rgba(124, 58, 237, 0.1);
+      color: #a78bfa;
+      border: 1px solid rgba(124, 58, 237, 0.3);
+    }
+
+    .state-PIN_PAYMENT_PENDING {
+      background: rgba(255, 201, 77, 0.1);
+      color: var(--yellow);
+      border: 1px solid rgba(255, 201, 77, 0.3);
+    }
+
+    .state-LOCATION_CONFIRM {
+      background: rgba(0, 212, 255, 0.1);
+      color: var(--accent);
+      border: 1px solid rgba(0, 212, 255, 0.3);
+    }
+
+    .state-SLOT_FILL {
+      background: rgba(255, 146, 60, 0.1);
+      color: #fb923c;
+      border: 1px solid rgba(255, 146, 60, 0.3);
+    }
+
+    .state-VERIFY {
+      background: rgba(255, 201, 77, 0.1);
+      color: var(--yellow);
+      border: 1px solid rgba(255, 201, 77, 0.3);
+    }
+
+    .state-LOCKED {
+      background: rgba(255, 77, 106, 0.1);
+      color: var(--red);
+      border: 1px solid rgba(255, 77, 106, 0.3);
+    }
+
+    .state-BUFFERED {
+      background: rgba(0, 212, 255, 0.08);
+      color: var(--accent);
+      border: 1px solid rgba(0, 212, 255, 0.2);
+    }
+
+    /* Intent */
+    .intent-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    .intent-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    /* Security */
+    .sec-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 0;
+      font-size: 12px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .sec-item:last-child {
+      border-bottom: none;
+    }
+
+    .sec-ico {
+      width: 18px;
+      text-align: center;
+      font-size: 13px;
+    }
+
+    .sec-lbl {
+      flex: 1;
+      color: #94a3b8;
+    }
+
+    .sec-badge {
+      font-size: 9px;
+      font-weight: 700;
+      padding: 2px 7px;
+      border-radius: 4px;
+      font-family: 'Space Mono', monospace;
+      letter-spacing: 0.05em;
+    }
+
+    .sb-none {
+      background: rgba(74, 85, 104, 0.15);
+      color: var(--muted);
+    }
+
+    .sb-ok {
+      background: rgba(0, 229, 160, 0.15);
+      color: var(--green);
+    }
+
+    .sb-wait {
+      background: rgba(255, 201, 77, 0.15);
+      color: var(--yellow);
+    }
+
+    .sb-active {
+      background: rgba(124, 58, 237, 0.15);
+      color: #a78bfa;
+    }
+
+    .sb-fail {
+      background: rgba(255, 77, 106, 0.15);
+      color: var(--red);
+    }
+
+    /* Log */
+    .log-entries {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      max-height: 200px;
+      overflow-y: auto;
+    }
+
+    .log-entry {
+      font-family: 'Space Mono', monospace;
+      font-size: 10px;
+      line-height: 1.5;
+      color: #475569;
+      padding: 4px 8px;
+      border-left: 2px solid var(--muted2);
+      background: rgba(13, 18, 32, 0.5);
+      border-radius: 0 4px 4px 0;
+    }
+
+    .log-entry .log-time {
+      color: var(--muted);
+    }
+
+    .log-entry .log-msg {
+      color: #64748b;
+    }
+
+    .log-entry.log-nova .log-msg {
+      color: #94a3b8;
+    }
+
+    .log-entry.log-user .log-msg {
+      color: #6366f1;
+    }
+
+    /* Routing */
+    .routing-box {
+      font-family: 'Space Mono', monospace;
+      font-size: 10px;
+      color: #4a5568;
+      line-height: 1.6;
+      background: rgba(13, 18, 32, 0.5);
+      border-radius: 6px;
+      padding: 8px 10px;
+      word-break: break-word;
+    }
+
+    /* Session warning */
+    .session-warning-bar {
+      display: none;
+      background: rgba(255, 201, 77, 0.08);
+      border: 1px solid rgba(255, 201, 77, 0.2);
+      border-radius: 8px;
+      padding: 8px 12px;
+      font-size: 11px;
+      color: var(--yellow);
+      font-family: 'Space Mono', monospace;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .session-warning-bar.visible {
+      display: flex;
+    }
+  </style>
 </head>
+
 <body>
 
-<!-- Header -->
-<div class="header">
-  <div class="header-left">
-    <div class="logo"><span>NOVA</span> Voice AI</div>
-    <div class="badge badge-layer">Layer 7</div>
-    <div class="badge badge-live">Live Demo</div>
-  </div>
-  <div class="session-indicator">
-    <div class="session-dot" id="sessionDot"></div>
-    <span id="sessionLabel">No session</span>
-  </div>
-</div>
-
-<!-- Main -->
-<div class="main">
-
-  <!-- Chat -->
-  <div class="chat-area">
-    <div class="messages" id="messages">
-      <div class="welcome">
-        <h2>👋 NOVA Layer 7 — Dialogue Manager</h2>
-        <p>Type any voice command below to see how Layer 7 classifies,<br>routes, and responds to it in real time.</p>
+  <!-- Header -->
+  <div class="header">
+    <div class="logo">
+      <div class="logo-icon">🚗</div>
+      <div>
+        <div class="logo-text">NOVA</div>
+        <div class="logo-sub">In-Car AI</div>
       </div>
     </div>
-
-    <div class="input-area">
-      <div class="input-row">
-        <input
-          type="text"
-          class="input-box"
-          id="inputBox"
-          placeholder="Type a command... (e.g. turn on AC, navigate to airport, order coffee)"
-          autocomplete="off"
-        />
-        <button class="send-btn" onclick="sendMessage()">Send →</button>
-      </div>
-      <div class="quick-cmds">
-        <button class="quick-btn" onclick="quickSend('verify me')">🔐 Verify me</button>
-        <button class="quick-btn" onclick="quickSend('turn on AC')">❄️ Turn on AC</button>
-        <button class="quick-btn" onclick="quickSend('navigate to airport')">🗺️ Navigate</button>
-        <button class="quick-btn" onclick="quickSend('navigate to')">🧩 Slot fill</button>
-        <button class="quick-btn" onclick="quickSend('play relaxing music')">🎵 Play music</button>
-        <button class="quick-btn" onclick="quickSend('order a coffee')">☕ Order coffee</button>
-        <button class="quick-btn" onclick="quickSend('call mom')">📞 Call mom</button>
-        <button class="quick-btn" onclick="quickSend('what is the weather')">💬 Ask question</button>
-        <button class="quick-btn" onclick="quickSend('stop')">⛔ Stop</button>
-      </div>
+    <div class="header-center">
+      <div class="pill pill-layer">Layer 7</div>
+      <div class="pill pill-live"><span class="pill-dot"></span>Live</div>
+    </div>
+    <div class="header-right">
+      <div class="session-timer" id="sessionTimer">⏱ No session</div>
     </div>
   </div>
 
-  <!-- Side panel -->
-  <div class="side-panel">
+  <!-- Main -->
+  <div class="main">
 
-    <!-- FSM State -->
-    <div class="panel-section">
-      <div class="panel-header">⚙️ FSM State</div>
-      <div class="panel-body">
-        <div class="fsm-state state-idle" id="fsmState">IDLE</div>
-      </div>
-    </div>
+    <!-- Left: Screen area -->
+    <div class="screen-area">
 
-    <!-- Intent -->
-    <div class="panel-section">
-      <div class="panel-header">🏷️ Intent Classified</div>
-      <div class="panel-body">
-        <div class="intent-badge intent-unknown" id="intentBadge">
-          <span class="intent-icon">—</span>
-          <span id="intentText">Waiting for input</span>
-        </div>
-        <div style="font-size:11px;color:#475569;font-family:'JetBrains Mono',monospace;">
-          Confidence: <span id="confidenceText">—</span>
-        </div>
-      </div>
-    </div>
-
-    <!-- Routing -->
-    <div class="panel-section">
-      <div class="panel-header">🔀 Routing Decision</div>
-      <div class="panel-body">
-        <div class="routing-text" id="routingText">No routing yet</div>
-      </div>
-    </div>
-
-    <!-- Entities -->
-    <div class="panel-section">
-      <div class="panel-header">📦 Extracted Entities</div>
-      <div class="panel-body" id="entitiesPanel">
-        <div class="empty-state">No entities yet</div>
-      </div>
-    </div>
-
-    <!-- OTP -->
-    <div class="panel-section" id="otpSection" style="display:none">
-      <div class="panel-header">🔊 Voice OTP</div>
-      <div class="panel-body">
-        <div style="font-size:11px;color:#94a3b8;margin-bottom:8px;text-align:center;">Nova speaks this code — driver must repeat it</div>
-        <div class="otp-display" id="otpDisplay"></div>
-        <div style="font-size:11px;color:#475569;text-align:center;margin-top:8px;">Unique per transaction — changes every time</div>
-      </div>
-    </div>
-
-    <!-- Security Stack -->
-    <div class="panel-section">
-      <div class="panel-header">🔐 Security Stack</div>
-      <div class="panel-body">
-        <div class="security-item">
-          <span class="security-icon">🎙️</span>
-          <span class="security-label">Voice biometric</span>
-          <span class="security-status" id="secVoice" style="background:rgba(100,116,139,0.15);color:#64748b">—</span>
-        </div>
-        <div class="security-item">
-          <span class="security-icon">🔑</span>
-          <span class="security-label">Session token</span>
-          <span class="security-status" id="secSession" style="background:rgba(100,116,139,0.15);color:#64748b">—</span>
-        </div>
-        <div class="security-item">
-          <span class="security-icon">✅</span>
-          <span class="security-label">Confirm pending</span>
-          <span class="security-status" id="secConfirm" style="background:rgba(100,116,139,0.15);color:#64748b">—</span>
-        </div>
-        <div class="security-item">
-          <span class="security-icon">🔢</span>
-          <span class="security-label">Voice OTP</span>
-          <span class="security-status" id="secOtp" style="background:rgba(100,116,139,0.15);color:#64748b">—</span>
-        </div>
-        <div class="security-item">
-          <span class="security-icon">💳</span>
-          <span class="security-label">Payment signed</span>
-          <span class="security-status" id="secPayment" style="background:rgba(100,116,139,0.15);color:#64748b">—</span>
+      <!-- Nova voice display -->
+      <div class="nova-voice">
+        <div class="nova-orb" id="novaOrb">🤖</div>
+        <div class="nova-speech">
+          <div class="nova-label">NOVA SAYS</div>
+          <div class="nova-text empty" id="novaText">Waiting for command...</div>
+          <div class="waveform" id="waveform" style="margin-top:6px">
+            <div class="wave-bar" style="height:4px"></div>
+            <div class="wave-bar" style="height:8px"></div>
+            <div class="wave-bar" style="height:6px"></div>
+            <div class="wave-bar" style="height:12px"></div>
+            <div class="wave-bar" style="height:6px"></div>
+            <div class="wave-bar" style="height:8px"></div>
+            <div class="wave-bar" style="height:4px"></div>
+          </div>
         </div>
       </div>
+
+      <!-- Screens -->
+      <div class="screens">
+
+        <!-- IDLE -->
+        <div class="screen active" id="screen-idle">
+          <div class="idle-orb">🎙️</div>
+          <div>
+            <div class="idle-title">Ready to assist</div>
+            <div class="idle-sub" style="margin-top:8px">Say a command or tap a shortcut below</div>
+          </div>
+          <div class="quick-actions">
+            <button class="qa-btn" onclick="quickSend('turn on AC')">❄️ Turn on AC</button>
+            <button class="qa-btn" onclick="quickSend('navigate to airport')">🗺️ Navigate</button>
+            <button class="qa-btn" onclick="quickSend('order a coffee')">☕ Order coffee</button>
+            <button class="qa-btn" onclick="quickSend('play relaxing music')">🎵 Play music</button>
+            <button class="qa-btn" onclick="quickSend('call mom')">📞 Call mom</button>
+            <button class="qa-btn" onclick="quickSend('what is the weather')">🌤️ Ask anything</button>
+            <button class="qa-btn" onclick="quickSend('emergency')">🚨 Emergency</button>
+          </div>
+        </div>
+
+        <!-- MERCHANT SELECTION -->
+        <div class="screen" id="screen-merchant">
+          <div class="screen-title">📍 Nearby options — tap or say the name</div>
+          <div id="merchantList"></div>
+        </div>
+
+        <!-- ORDER CONFIRM -->
+        <div class="screen" id="screen-confirm">
+          <div class="screen-title">🛒 Review your order</div>
+          <div class="order-card" id="orderCard">
+            <div class="order-header">
+              <div class="order-merchant-icon" id="confirmMerchantIcon">☕</div>
+              <div>
+                <div class="order-merchant-name" id="confirmMerchantName">—</div>
+                <div class="order-merchant-addr" id="confirmMerchantAddr">—</div>
+              </div>
+            </div>
+            <div class="order-item-row">
+              <span class="label">Item</span>
+              <span class="val" id="confirmItem">—</span>
+            </div>
+            <div class="order-item-row">
+              <span class="label">Subtotal</span>
+              <span class="val" id="confirmSubtotal">—</span>
+            </div>
+            <div class="order-item-row">
+              <span class="label">Nova fee <span class="nova-fee-note">(3%)</span></span>
+              <span class="val" id="confirmFee">—</span>
+            </div>
+            <div class="order-item-row total">
+              <span>Total</span>
+              <span class="val" id="confirmTotal">—</span>
+            </div>
+          </div>
+          <div class="confirm-actions">
+            <button class="btn btn-confirm" onclick="quickSend('yes')">✓ Confirm</button>
+            <button class="btn btn-cancel" onclick="quickSend('no')">✕ Cancel</button>
+          </div>
+        </div>
+
+        <!-- OTP -->
+        <div class="screen" id="screen-otp">
+          <div class="screen-title" style="text-align:center">🔊 Voice OTP</div>
+          <div class="otp-instruction">Nova will speak a 4-digit code.<br>Repeat it back to authorize payment.</div>
+          <div class="otp-digits" id="otpDigits"></div>
+          <div class="otp-word-hint" id="otpWords">—</div>
+          <div class="otp-attempts" id="otpAttempts">Say the digits out loud</div>
+        </div>
+
+        <!-- PIN fallback -->
+        <div class="screen" id="screen-pin">
+          <div class="pin-icon">🔑</div>
+          <div class="pin-title">Enter your PIN</div>
+          <div class="pin-sub">OTP verification failed. Type your 4-digit PIN to authorize this payment.</div>
+          <div class="pin-dots">
+            <div class="pin-dot" id="pd0"></div>
+            <div class="pin-dot" id="pd1"></div>
+            <div class="pin-dot" id="pd2"></div>
+            <div class="pin-dot" id="pd3"></div>
+          </div>
+        </div>
+
+        <!-- SUCCESS -->
+        <div class="screen" id="screen-success">
+          <div class="success-icon">✅</div>
+          <div class="success-title">Payment Confirmed</div>
+          <div class="success-amount" id="successAmount">$0.00</div>
+          <div class="success-details" id="successDetails"></div>
+          <div class="eta-badge" id="etaBadge">Ready in — min</div>
+        </div>
+
+      </div>
+
+      <!-- Input -->
+      <div class="input-zone">
+        <div class="session-warning-bar" id="sessionWarning">
+          ⚠️ <span id="sessionWarningText">Session expiring soon</span>
+        </div>
+        <div class="input-row" style="margin-top:10px">
+          <input type="text" class="input-field" id="inputField"
+            placeholder="Type a command... (e.g. order a coffee, turn on AC)" autocomplete="off" />
+          <button class="send-btn" onclick="sendMessage()">SEND →</button>
+        </div>
+      </div>
+
     </div>
 
+    <!-- Right panel -->
+    <div class="right-panel">
+
+      <div class="rp-section">
+        <div class="rp-label">⚙ FSM State</div>
+        <div class="state-pill state-IDLE" id="fsmPill">IDLE</div>
+      </div>
+
+      <div class="rp-section">
+        <div class="rp-label">🏷 Intent</div>
+        <div class="intent-row">
+          <div class="intent-dot" id="intentDot" style="background:#4a5568"></div>
+          <span id="intentLabel">Waiting...</span>
+        </div>
+      </div>
+
+      <div class="rp-section">
+        <div class="rp-label">🔐 Security Stack</div>
+        <div class="sec-item">
+          <span class="sec-ico">🎙️</span>
+          <span class="sec-lbl">Voice biometric</span>
+          <span class="sec-badge sb-none" id="secVoice">—</span>
+        </div>
+        <div class="sec-item">
+          <span class="sec-ico">🔑</span>
+          <span class="sec-lbl">Session token</span>
+          <span class="sec-badge sb-none" id="secSession">—</span>
+        </div>
+        <div class="sec-item">
+          <span class="sec-ico">✅</span>
+          <span class="sec-lbl">Confirm</span>
+          <span class="sec-badge sb-none" id="secConfirm">—</span>
+        </div>
+        <div class="sec-item">
+          <span class="sec-ico">🔢</span>
+          <span class="sec-lbl">Voice OTP</span>
+          <span class="sec-badge sb-none" id="secOtp">—</span>
+        </div>
+        <div class="sec-item">
+          <span class="sec-ico">💳</span>
+          <span class="sec-lbl">Payment</span>
+          <span class="sec-badge sb-none" id="secPayment">—</span>
+        </div>
+      </div>
+
+      <div class="rp-section">
+        <div class="rp-label">🔀 Routing</div>
+        <div class="routing-box" id="routingBox">—</div>
+      </div>
+
+      <div class="rp-section">
+        <div class="rp-label">📋 Log</div>
+        <div class="log-entries" id="logEntries"></div>
+      </div>
+
+    </div>
   </div>
-</div>
 
-<script>
-  const INTENT_CONFIG = {
-    vehicle_control:  { icon: "🚗", label: "Vehicle Control",  cls: "intent-vehicle" },
-    navigation:       { icon: "🗺️", label: "Navigation",       cls: "intent-navigation" },
-    media:            { icon: "🎵", label: "Media",            cls: "intent-media" },
-    payment:          { icon: "💳", label: "Payment",          cls: "intent-payment" },
-    general_question: { icon: "💬", label: "General Question", cls: "intent-question" },
-    stop:             { icon: "⛔", label: "Stop / Cancel",    cls: "intent-stop" },
-    communication:    { icon: "📞", label: "Communication",    cls: "intent-communication" },
-    unknown:          { icon: "❓", label: "Unknown",          cls: "intent-unknown" },
-  };
+  <script>
+    const INTENT_COLORS = {
+      vehicle_control: '#38bdf8',
+      navigation: '#34d399',
+      media: '#c084fc',
+      payment: '#fb923c',
+      general_question: '#818cf8',
+      stop: '#f87171',
+      communication: '#4ade80',
+      emergency: '#ff4d6a',
+      unknown: '#4a5568',
+    };
 
-  const STATE_CONFIG = {
-    IDLE:            { cls: "state-idle",       label: "IDLE" },
-    VERIFY:          { cls: "state-verify",     label: "VERIFY" },
-    PROCESSING:      { cls: "state-processing", label: "PROCESSING" },
-    SLOT_FILL:       { cls: "state-slot",       label: "SLOT FILL" },
-    CONFIRM_PENDING: { cls: "state-confirm",    label: "CONFIRM PENDING" },
-    OTP_PENDING:     { cls: "state-otp",        label: "OTP PENDING" },
-  };
+    const MERCHANT_ICONS = {
+      coffee: '☕', food: '🥪', fuel: '⛽', default: '🏪'
+    };
 
-  function getTime() {
-    return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  }
-
-  function addMessage(role, text, response) {
-    const messages = document.getElementById('messages');
-
-    const msg = document.createElement('div');
-    msg.className = `msg ${role}`;
-
-    const avatar = document.createElement('div');
-    avatar.className = 'msg-avatar';
-    avatar.textContent = role === 'user' ? '👤' : '🤖';
-
-    const content = document.createElement('div');
-    content.className = 'msg-content';
-
-    const bubble = document.createElement('div');
-    bubble.className = 'msg-bubble';
-    bubble.textContent = text;
-
-    const meta = document.createElement('div');
-    meta.className = 'msg-meta';
-    meta.textContent = getTime();
-
-    content.appendChild(bubble);
-
-    // Add state tag for nova messages
-    if (role === 'nova' && response) {
-      const stateTag = document.createElement('div');
-      const stateConf = STATE_CONFIG[response.fsm_state] || STATE_CONFIG['IDLE'];
-      stateTag.className = `msg-state ${stateConf.cls}`;
-      stateTag.textContent = stateConf.label;
-      content.appendChild(stateTag);
+    function getTime() {
+      return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
     }
 
-    content.appendChild(meta);
-    msg.appendChild(avatar);
-    msg.appendChild(content);
-    messages.appendChild(msg);
-    messages.scrollTop = messages.scrollHeight;
-  }
-
-  function updatePanel(response) {
-    // FSM State
-    const fsmEl = document.getElementById('fsmState');
-    const stateConf = STATE_CONFIG[response.fsm_state] || STATE_CONFIG['IDLE'];
-    fsmEl.className = `fsm-state ${stateConf.cls}`;
-    fsmEl.textContent = stateConf.label;
-
-    // Intent
-    const intentConf = INTENT_CONFIG[response.intent] || INTENT_CONFIG['unknown'];
-    const intentBadge = document.getElementById('intentBadge');
-    intentBadge.className = `intent-badge ${intentConf.cls}`;
-    intentBadge.innerHTML = `<span class="intent-icon">${intentConf.icon}</span><span>${intentConf.label}</span>`;
-    document.getElementById('intentText');
-    document.getElementById('confidenceText').textContent = response.confidence || '—';
-
-    // Routing
-    document.getElementById('routingText').textContent = response.routing || '—';
-
-    // Entities
-    const entPanel = document.getElementById('entitiesPanel');
-    const entities = response.entities || {};
-    if (Object.keys(entities).length === 0) {
-      entPanel.innerHTML = '<div class="empty-state">No entities extracted</div>';
-    } else {
-      entPanel.innerHTML = Object.entries(entities).map(([k, v]) => `
-        <div class="entity-row">
-          <span class="entity-key">${k}</span>
-          <span class="entity-val">${v || '—'}</span>
-        </div>
-      `).join('');
+    function showScreen(id) {
+      document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+      const el = document.getElementById('screen-' + id);
+      if (el) el.classList.add('active');
     }
 
-    // OTP
-    const otpSection = document.getElementById('otpSection');
-    if (response.otp && response.otp.length > 0) {
-      otpSection.style.display = 'block';
-      const otpDisplay = document.getElementById('otpDisplay');
-      otpDisplay.innerHTML = response.otp.map(d => `
-        <div class="otp-digit">${d}</div>
-      `).join('');
-      updateSecurity('secOtp', 'ACTIVE', 'pending');
-    } else if (response.fsm_state === 'IDLE') {
-      otpSection.style.display = 'none';
-    }
-
-    // Session indicator
-    const dot = document.getElementById('sessionDot');
-    const label = document.getElementById('sessionLabel');
-    if (response.session_started || response.fsm_state !== 'VERIFY') {
-      if (response.intent !== 'stop' && response.fsm_state === 'IDLE') {
-        dot.classList.add('active');
-        label.textContent = 'Session active';
+    function setNova(text, speaking = true) {
+      const el = document.getElementById('novaText');
+      el.textContent = text;
+      el.classList.toggle('empty', !text || text === 'Waiting for command...');
+      const orb = document.getElementById('novaOrb');
+      const bars = document.querySelectorAll('.wave-bar');
+      orb.classList.toggle('speaking', speaking);
+      bars.forEach(b => b.classList.toggle('active', speaking));
+      if (speaking) {
+        setTimeout(() => {
+          orb.classList.remove('speaking');
+          bars.forEach(b => b.classList.remove('active'));
+        }, 3000);
       }
     }
-    if (response.fsm_state === 'VERIFY') {
-      dot.classList.remove('active');
-      label.textContent = 'Verify required';
+
+    function addLog(role, text) {
+      const entries = document.getElementById('logEntries');
+      const div = document.createElement('div');
+      div.className = `log-entry log-${role}`;
+      div.innerHTML = `<span class="log-time">${getTime()}</span> <span class="log-msg">${role === 'user' ? '→' : '←'} ${text.substring(0, 80)}${text.length > 80 ? '…' : ''}</span>`;
+      entries.prepend(div);
+      // Keep max 20 entries
+      while (entries.children.length > 20) entries.removeChild(entries.lastChild);
     }
 
-    // Security stack updates
-    if (response.verify_message) {
-      updateSecurity('secVoice', 'PASS', 'ok');
-      updateSecurity('secSession', 'ACTIVE', 'ok');
+    function setSecurity(id, text, cls) {
+      const el = document.getElementById(id);
+      el.textContent = text;
+      el.className = 'sec-badge ' + cls;
     }
-    if (response.fsm_state === 'CONFIRM_PENDING') {
-      updateSecurity('secConfirm', 'WAITING', 'pending');
+
+    function resetSecurity() {
+      ['secVoice', 'secSession', 'secConfirm', 'secOtp', 'secPayment'].forEach(id => setSecurity(id, '—', 'sb-none'));
     }
-    if (response.action === 'payment_authorized') {
-      updateSecurity('secConfirm', 'PASS', 'ok');
-      updateSecurity('secOtp', 'PASS', 'ok');
-      updateSecurity('secPayment', 'SIGNED', 'ok');
+
+    function updateFSM(state) {
+      const pill = document.getElementById('fsmPill');
+      pill.className = 'state-pill state-' + (state || 'IDLE');
+      pill.textContent = (state || 'IDLE').replace(/_/g, ' ');
     }
-    if (response.action === 'payment_denied') {
-      updateSecurity('secOtp', 'FAIL', 'fail');
+
+    function updateIntent(intent) {
+      const color = INTENT_COLORS[intent] || INTENT_COLORS.unknown;
+      document.getElementById('intentDot').style.background = color;
+      const label = (intent || 'unknown').replace(/_/g, ' ');
+      document.getElementById('intentLabel').textContent = label.charAt(0).toUpperCase() + label.slice(1);
     }
-    if (response.intent === 'stop') {
-      // Reset security panel
-      ['secVoice','secSession','secConfirm','secOtp','secPayment'].forEach(id => {
-        updateSecurity(id, '—', 'none');
-      });
-      dot.classList.remove('active');
-      label.textContent = 'No session';
+
+    function buildMerchantList(merchants) {
+      const list = document.getElementById('merchantList');
+      const icons = { coffee: '☕', food: '🥪', fuel: '⛽' };
+      list.innerHTML = merchants.map((m, i) => `
+      <div class="merchant-card" onclick="quickSend('${m.name}')">
+        <div class="merchant-num">${i + 1}</div>
+        <div class="merchant-icon">${icons[m.category] || '🏪'}</div>
+        <div class="merchant-info">
+          <div class="merchant-name">${m.name}</div>
+          <div class="merchant-meta">${m.address || 'Nearby'}</div>
+        </div>
+        <div class="merchant-dist">${m.distance_miles ? m.distance_miles + ' mi' : '—'}</div>
+      </div>
+    `).join('');
     }
-  }
 
-  function updateSecurity(id, text, type) {
-    const el = document.getElementById(id);
-    el.textContent = text;
-    el.className = 'security-status';
-    if (type === 'ok')      { el.style.background = 'rgba(34,197,94,0.15)';  el.style.color = '#4ade80'; }
-    if (type === 'pending') { el.style.background = 'rgba(251,191,36,0.15)'; el.style.color = '#fbbf24'; }
-    if (type === 'fail')    { el.style.background = 'rgba(239,68,68,0.15)';  el.style.color = '#f87171'; }
-    if (type === 'none')    { el.style.background = 'rgba(100,116,139,0.15)'; el.style.color = '#64748b'; }
-  }
+    function buildConfirmScreen(entities) {
+      document.getElementById('confirmMerchantName').textContent = entities.merchant_name || '—';
+      document.getElementById('confirmMerchantAddr').textContent = entities.address || '—';
+      document.getElementById('confirmItem').textContent = entities.item_name || '—';
+      const sub = parseFloat(entities.subtotal || entities.item_price || 0);
+      const fee = parseFloat(entities.nova_fee || 0);
+      const total = parseFloat(entities.total || sub);
+      document.getElementById('confirmSubtotal').textContent = `$${sub.toFixed(2)}`;
+      document.getElementById('confirmFee').textContent = `$${fee.toFixed(2)}`;
+      document.getElementById('confirmTotal').textContent = `$${total.toFixed(2)}`;
+    }
 
-  async function sendMessage() {
-    const inputBox = document.getElementById('inputBox');
-    const text = inputBox.value.trim();
-    if (!text) return;
+    function buildOTPScreen(otp) {
+      const words = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"];
+      document.getElementById('otpDigits').innerHTML = otp.map(d => `<div class="otp-digit">${d}</div>`).join('');
+      document.getElementById('otpWords').textContent = otp.map(d => words[d]).join(' · ');
+    }
 
-    inputBox.value = '';
-    addMessage('user', text, null);
+    function buildSuccessScreen(entities) {
+      const total = parseFloat(entities.total || 0);
+      document.getElementById('successAmount').textContent = `$${total.toFixed(2)}`;
+      document.getElementById('etaBadge').textContent = `Ready in ${entities.eta_order || '—'}`;
+      document.getElementById('successDetails').innerHTML = [
+        ['Order ID', entities.order_id || '—'],
+        ['Transaction', entities.transaction_id || '—'],
+        ['Merchant', entities.merchant_name || '—'],
+        ['Items', entities.items || '—'],
+        ['Payment', entities.payment_method || 'Nova Pay'],
+      ].map(([k, v]) => `<div class="success-row"><span class="sk">${k}</span><span class="sv">${v}</span></div>`).join('');
+    }
 
-    try {
-      const res = await fetch('/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text })
-      });
-      const data = await res.json();
+    // Session timer
+    let sessionStart = null;
+    let sessionInterval = null;
+    function startSessionTimer() {
+      sessionStart = Date.now();
+      const timerEl = document.getElementById('sessionTimer');
+      if (sessionInterval) clearInterval(sessionInterval);
+      sessionInterval = setInterval(() => {
+        const elapsed = Math.floor((Date.now() - sessionStart) / 1000);
+        const remaining = 900 - elapsed;
+        if (remaining <= 0) {
+          timerEl.textContent = '⏱ Session expired';
+          timerEl.className = 'session-timer';
+          clearInterval(sessionInterval);
+          return;
+        }
+        const mins = Math.floor(remaining / 60);
+        const secs = remaining % 60;
+        timerEl.textContent = `⏱ ${mins}:${secs.toString().padStart(2, '0')}`;
+        timerEl.className = `session-timer ${remaining <= 120 ? 'warning' : 'active'}`;
+      }, 1000);
+    }
 
-      // Show verify message first if present
-      if (data.verify_message) {
-        addMessage('nova', data.verify_message, { fsm_state: 'PROCESSING', intent: data.intent });
+    function handleResponse(data) {
+      setNova(data.nova_says);
+      updateFSM(data.fsm_state);
+      updateIntent(data.intent);
+      document.getElementById('routingBox').textContent = data.routing || '—';
+      addLog('nova', data.nova_says);
+
+      // Session warning
+      const warnBar = document.getElementById('sessionWarning');
+      if (data.session_warning) {
+        warnBar.classList.add('visible');
+        document.getElementById('sessionWarningText').textContent = '⚠️ ' + data.session_warning;
+      } else {
+        warnBar.classList.remove('visible');
       }
 
-      addMessage('nova', data.nova_says, data);
-      updatePanel(data);
+      const state = data.fsm_state;
+      const intent = data.intent;
+      const entities = data.entities || {};
 
-    } catch (err) {
-      addMessage('nova', 'Error connecting to server. Is the server running?', null);
+      // Determine which screen to show
+      if (state === 'IDLE' && data.action === 'payment_confirmed') {
+        buildSuccessScreen(entities);
+        showScreen('success');
+        setSecurity('secConfirm', 'PASS', 'sb-ok');
+        setSecurity('secOtp', 'PASS', 'sb-ok');
+        setSecurity('secPayment', 'SIGNED', 'sb-ok');
+        if (!sessionStart) startSessionTimer();
+        setTimeout(() => showScreen('idle'), 6000);
+
+      } else if (state === 'CONFIRM_PENDING' && entities.merchants) {
+        buildMerchantList(entities.merchants);
+        showScreen('merchant');
+        setSecurity('secConfirm', 'WAIT', 'sb-wait');
+
+      } else if (state === 'CONFIRM_PENDING' && !entities.merchants) {
+        buildConfirmScreen(entities);
+        showScreen('confirm');
+        setSecurity('secConfirm', 'WAIT', 'sb-wait');
+
+      } else if (state === 'OTP_PENDING') {
+        if (data.otp) buildOTPScreen(data.otp);
+        showScreen('otp');
+        setSecurity('secOtp', 'ACTIVE', 'sb-active');
+
+      } else if (state === 'PIN_PAYMENT_PENDING') {
+        showScreen('pin');
+        setSecurity('secOtp', 'FAIL', 'sb-fail');
+        document.getElementById('pd0').classList.remove('filled');
+        document.getElementById('pd1').classList.remove('filled');
+        document.getElementById('pd2').classList.remove('filled');
+        document.getElementById('pd3').classList.remove('filled');
+
+      } else if (state === 'IDLE') {
+        showScreen('idle');
+        if (intent === 'stop') resetSecurity();
+      }
+
+      // Payment denied
+      if (data.action === 'payment_denied') {
+        showScreen('idle');
+        setSecurity('secPayment', 'DENIED', 'sb-fail');
+      }
     }
-  }
 
-  function quickSend(text) {
-    document.getElementById('inputBox').value = text;
-    sendMessage();
-  }
+    // PIN dots update
+    function updatePinDots(text) {
+      const len = text.replace(/\s/g, '').length;
+      for (let i = 0; i < 4; i++) {
+        document.getElementById(`pd${i}`).classList.toggle('filled', i < len);
+      }
+    }
 
-  // Enter key to send
-  document.getElementById('inputBox').addEventListener('keydown', e => {
-    if (e.key === 'Enter') sendMessage();
-  });
-</script>
+    async function sendMessage() {
+      const field = document.getElementById('inputField');
+      const text = field.value.trim();
+      if (!text) return;
+      field.value = '';
+      addLog('user', text);
+
+      // Update PIN dots if in PIN screen
+      const activePIN = document.getElementById('screen-pin').classList.contains('active');
+
+      try {
+        const res = await fetch('/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: text })
+        });
+        const data = await res.json();
+        handleResponse(data);
+      } catch (err) {
+        setNova('Error connecting to server.', false);
+      }
+    }
+
+    function quickSend(text) {
+      document.getElementById('inputField').value = text;
+      sendMessage();
+    }
+
+    // Input tracking for PIN dots
+    document.getElementById('inputField').addEventListener('input', e => {
+      if (document.getElementById('screen-pin').classList.contains('active')) {
+        updatePinDots(e.target.value);
+      }
+    });
+
+    document.getElementById('inputField').addEventListener('keydown', e => {
+      if (e.key === 'Enter') sendMessage();
+    });
+  </script>
 </body>
+
 </html>
