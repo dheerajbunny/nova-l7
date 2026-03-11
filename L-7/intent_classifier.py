@@ -162,6 +162,22 @@ def extract_entities(text: str, intent: str) -> dict:
             entities["query"] = play_match.group(1).strip()
 
     if intent == "payment":
+        # ── Extract size ─────────────────────────────────────────────────
+        sizes = ["small", "medium", "large", "grande", "venti", "tall", "regular", "extra large"]
+        for size in sizes:
+            if size in text_lower:
+                entities["size"] = size
+                break
+                
+        # ── Extract quantity ─────────────────────────────────────────────
+        quantity_map = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "a": 1, "an": 1}
+        qty_match = re.search(r"\b(one|two|three|four|five|a|an|\d+)\b", text_lower)
+        if qty_match:
+            word = qty_match.group(1)
+            entities["quantity"] = quantity_map.get(word, int(word) if word.isdigit() else 1)
+        else:
+            entities["quantity"] = 1
+
         # ── Extract merchant name ────────────────────────────────────────
         for merchant in KNOWN_MERCHANTS:
             if merchant in text_lower:

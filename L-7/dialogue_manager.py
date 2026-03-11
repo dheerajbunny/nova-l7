@@ -285,7 +285,8 @@ def handle_order_flow(entities: dict, raw_text: str, dm_state) -> dict:
 
         if menu_r["found"] and menu_r["menu"]:
             first = menu_r["menu"][0]
-            add_to_basket(basket["basket_id"], first["id"])
+            quantity = dm_state.pending_entities.get("quantity", 1)
+            add_to_basket(basket["basket_id"], first["id"], quantity)
             checkout_data = checkout(basket["basket_id"])
 
         item_price = first["price"] if first else 0.0
@@ -341,7 +342,8 @@ def handle_order_flow(entities: dict, raw_text: str, dm_state) -> dict:
 
                 if menu_r["found"] and menu_r["menu"]:
                     first = menu_r["menu"][0]
-                    add_to_basket(basket["basket_id"], first["id"])
+                    quantity = dm_state.pending_entities.get("quantity", 1)
+                    add_to_basket(basket["basket_id"], first["id"], quantity)
                     checkout_data = checkout(basket["basket_id"])
 
                 item_price = first["price"] if first else 0.0

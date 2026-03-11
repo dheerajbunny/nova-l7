@@ -65,6 +65,32 @@ MERCHANTS = [
         "address":  "101 Highway Ave, San Francisco, CA",
         "lat":      37.7750,
         "lng":      -122.4180
+    },
+    {
+        "id":       "m005",
+        "name":     "McDonald's",
+        "area":     "Financial District",
+        "category": "food",
+        "distance": "0.6 miles",
+        "eta_drive": "3 min",
+        "eta_order": "5 min",
+        "rating":   4.1,
+        "address":  "200 Montgomery St, San Francisco, CA",
+        "lat":      37.7915,
+        "lng":      -122.4018
+    },
+    {
+        "id":       "m006",
+        "name":     "Pizza Hut",
+        "area":     "Mission District",
+        "category": "food",
+        "distance": "1.5 miles",
+        "eta_drive": "8 min",
+        "eta_order": "20 min",
+        "rating":   3.9,
+        "address":  "800 Mission St, San Francisco, CA",
+        "lat":      37.7816,
+        "lng":      -122.4055
     }
 ]
 
@@ -87,6 +113,15 @@ MENU_ITEMS = [
     # Shell
     {"id": "i010", "merchant_id": "m004", "name": "Regular Fuel",   "price": 0.00, "category": "fuel"},
     {"id": "i011", "merchant_id": "m004", "name": "Premium Fuel",   "price": 0.00, "category": "fuel"},
+    
+    # McDonald's
+    {"id": "i012", "merchant_id": "m005", "name": "Big Mac",        "price": 6.99, "category": "burger"},
+    {"id": "i013", "merchant_id": "m005", "name": "McChicken",      "price": 5.49, "category": "burger"},
+    {"id": "i014", "merchant_id": "m005", "name": "French Fries",   "price": 3.29, "category": "side"},
+    
+    # Pizza Hut
+    {"id": "i015", "merchant_id": "m006", "name": "Pepperoni Pizza", "price": 14.99, "category": "pizza"},
+    {"id": "i016", "merchant_id": "m006", "name": "Cheese Pizza",    "price": 12.99, "category": "pizza"},
 ]
 
 
@@ -273,7 +308,7 @@ def create_basket(merchant_id: str) -> dict:
     return {"basket_id": basket_id}
 
 
-def add_to_basket(basket_id: str, item_id: str) -> dict:
+def add_to_basket(basket_id: str, item_id: str, quantity: int = 1) -> dict:
     """
     Add item to basket.
     Called when driver selects an item from menu.
@@ -291,16 +326,19 @@ def add_to_basket(basket_id: str, item_id: str) -> dict:
     basket_item_id = f"BI-{uuid.uuid4().hex[:6].upper()}"
     c.execute("""
         INSERT INTO basket_items VALUES (?,?,?,?,?,?)
-    """, (basket_item_id, basket_id, item_id, item[2], item[3], 1))
+    """, (basket_item_id, basket_id, item_id, item[2], item[3], quantity))
 
     conn.commit()
     conn.close()
 
+    total_price = item[3] * quantity
+    qty_str = f"{quantity}x " if quantity > 1 else ""
+
     return {
         "success":   True,
         "item_name": item[2],
-        "price":     item[3],
-        "nova_says": (f"Added {item[2]} — ${item[3]:.2f}. "
+        "price":     total_price,
+        "nova_says": (f"Added {qty_str}{item[2]} — ${total_price:.2f}. "
                       f"Anything else or shall I checkout?")
     }
 
