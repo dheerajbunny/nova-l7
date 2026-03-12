@@ -2,15 +2,31 @@
 NOVA Layer 7 - Dialogue Manager
 
 AGREED FLOW:
-──────────────────────────────────────────────────
-1. No voice auth blocking in web — NEEDS_VERIFICATION = []
-2. Payment flow: order → merchant → yes → Voice OTP → payment
-3. OTP fail x2 → PIN fallback → payment denied if PIN fails
-4. Location check after OTP pass
-5. Session expiry warning at < 2 min (session_start tracked)
-6. Full L3 auth available via: python layer3_main.py (terminal only)
-7. All other features: emergency, stop, pause, resume, help, buffer
-──────────────────────────────────────────────────
+──────────────────────────────────────────────────────────────────────
+1. First interaction → Nova greets by name ("Hey Pavan!") or "Hey there!" if unknown
+   Name loaded from L-3/data/profiles.json (saved during enroll.py)
+2. No voice auth blocking in web – NEEDS_VERIFICATION = []
+3. Payment flow: order → merchant → yes → Voice OTP → payment
+4. OTP fail x2 → PIN fallback → payment denied if PIN fails
+5. Location check after OTP pass
+6. Session expiry warning at < 2 min (session_start tracked)
+7. Full L3 auth available via: python layer3_main.py (terminal only)
+8. All other features: emergency, stop, pause, resume, help, buffer
+
+GREETING TIERS:
+──────────────────────────────────────────────────────────────────────
+Tier 1 - Not enrolled at all (no profiles.json entry):
+    → "Hey Guest! I'm Nova, your in-car assistant."
+
+Tier 2 - Enrolled but no name given (name is empty/default):
+    → "Hey Driver 1! I'm Nova, your in-car assistant."
+
+Tier 3 - Enrolled with name, first time (total_orders == 0):
+    → "Hey Pavan! I'm Nova, your in-car assistant."
+
+Tier 4 - Enrolled with name, returning (total_orders > 0):
+    → "Welcome back, Pavan! You have 3 orders with Nova."
+──────────────────────────────────────────────────────────────────────
 """
 
 from intent_classifier import IntentClassifier, IntentResult
@@ -18,10 +34,11 @@ from dataclasses import dataclass, field
 from typing import Optional
 import time
 import random
+import json
 import sys
 import os
 
-# ── Connect to Layer 3 ────────────────────────────────────────────────────────
+# ── Connect to Layer 3 ──────────────────────────────────────────────────────────────────────────
 L3_PATH = os.path.join(os.path.dirname(__file__), '..', 'L-3')
 sys.path.insert(0, os.path.abspath(L3_PATH))
 
@@ -30,11 +47,11 @@ try:
     from layer3_main import check_session
     from pin_handler import verify_pin
     L3_AVAILABLE = True
-    print("[Layer 7] Layer 3 connected — session/PIN checking active")
+    print("[Layer 7] Layer 3 connected – session/PIN checking active")
 except ImportError as e:
-    print(f"[Layer 7] Layer 3 not available ({e}) — simulation mode")
+    print(f"[Layer 7] Layer 3 not available ({e}) – simulation mode")
 
-# ── Connect to Mock Commerce ──────────────────────────────────────────────────
+# ── Connect to Mock Commerce ────────────────────────────────────────────────────────────────────
 COMMERCE_AVAILABLE = False
 try:
     from mock_order import (
@@ -42,21 +59,21 @@ try:
         add_to_basket, checkout, process_payment
     )
     COMMERCE_AVAILABLE = True
-    print("[Layer 7] Mock commerce connected — SQLite backend ready")
+    print("[Layer 7] Mock commerce connected – SQLite backend ready")
 except ImportError as e:
     print(f"[Layer 7] Commerce not available ({e})")
 
-# ── Connect to Audit Log ──────────────────────────────────────────────────────
+# ── Connect to Audit Log ────────────────────────────────────────────────────────────────────────
 AUDIT_AVAILABLE = False
 try:
     from audit_log import log_event
     AUDIT_AVAILABLE = True
     print("[Layer 7] Audit log connected")
 except ImportError:
-    print("[Layer 7] Audit log not available — skipping logging")
+    print("[Layer 7] Audit log not available – skipping logging")
 
 
-# ── Constants ─────────────────────────────────────────────────────────────────
+# ── Constants ───────────────────────────────────────────────────────────────────────────────────
 NEEDS_VERIFICATION     = []          # [] = no voice auth blocking in web
                                      # add "payment" when WebSocket mic ready
 CONTEXT_DECAY_SECONDS  = 300
@@ -66,8 +83,101 @@ PIN_MAX_ATTEMPTS       = 3
 SESSION_DURATION       = 900         # 15 minutes
 SESSION_WARN_SECONDS   = 120         # warn when < 2 min remaining
 
+# ── Profile path ────────────────────────────────────────────────────────────────────────────────
+PROFILES_PATH = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), '..', 'L-3', 'data', 'profiles.json')
+)
 
-# ── Dataclasses ───────────────────────────────────────────────────────────────
+
+# ╔══════════════════════════════════════════════════════════════════════════════════════════════╗
+#  DRIVER PROFILE – load name from enroll.py output
+# ╚══════════════════════════════════════════════════════════════════════════════════════════════╝
+
+def load_driver_profile(driver_id: str) -> dict:
+    """
+    Load driver profile from L-3/data/profiles.json.
+    profiles.json is created/updated by enroll.py when a new driver enrolls.
+    Returns None if driver not enrolled at all (triggers Guest greeting).
+    Returns profile dict if enrolled (name may or may not be set).
+    """
+    try:
+        if os.path.exists(PROFILES_PATH):
+            with open(PROFILES_PATH, "r") as f:
+                profiles = json.load(f)
+            if driver_id in profiles:
+                print(f"[Layer 7] Profile loaded – name: {profiles[driver_id].get('name')}")
+                return profiles[driver_id]
+    except Exception as e:
+        print(f"[Layer 7] Could not load profile: {e}")
+    # Return None = not enrolled = Guest
+    return None
+
+
+def save_profile_field(driver_id: str, key: str, value) -> None:
+    """Update a single field in the driver profile."""
+    try:
+        profiles = {}
+        if os.path.exists(PROFILES_PATH):
+            with open(PROFILES_PATH, "r") as f:
+                profiles = json.load(f)
+        if driver_id in profiles:
+            profiles[driver_id][key] = value
+            os.makedirs(os.path.dirname(PROFILES_PATH), exist_ok=True)
+            with open(PROFILES_PATH, "w") as f:
+                json.dump(profiles, f, indent=2)
+    except Exception as e:
+        print(f"[Layer 7] Profile save error: {e}")
+
+
+def get_greeting(profile, driver_id: str = "driver1") -> str:
+    """
+    Personalized greeting based on driver profile – 4 tiers:
+
+    Tier 1 – Not enrolled (profile is None):
+        "Hey Guest! I'm Nova, your in-car assistant."
+
+    Tier 2 – Enrolled but no name (name is empty / "there" / missing):
+        "Hey Driver 1! I'm Nova, your in-car assistant."
+
+    Tier 3 – Enrolled with name, first time (total_orders == 0):
+        "Hey Pavan! I'm Nova, your in-car assistant."
+
+    Tier 4 – Enrolled with name, returning (total_orders > 0):
+        "Welcome back, Pavan! You have 3 orders with Nova."
+    """
+    # ── Tier 1: Not enrolled at all ─────────────────────────────────────────────────────────────
+    if profile is None:
+        return "Hey Guest! I'm Nova, your in-car assistant. How can I help you today?"
+
+    name   = (profile.get("name") or "").strip()
+    orders = profile.get("total_orders", 0)
+
+    # ── Tier 2: Enrolled but no name ────────────────────────────────────────────────────────────
+    if not name or name.lower() in ("there", "guest", ""):
+        # Convert "driver1" → "Driver 1", "driver2" → "Driver 2"
+        label = driver_id.replace("driver", "Driver ").strip()
+        return f"Hey {label}! I'm Nova, your in-car assistant. How can I help you today?"
+
+    # ── Tier 3 & 4: Enrolled with name ──────────────────────────────────────────────────────────
+    last_order = profile.get("last_order")
+    if orders > 0 and last_order:
+        merchant = last_order.get("merchant_name", "")
+        item     = last_order.get("item_name", "")
+        return (
+            f"Welcome back, {name}. "
+            f"Your usual {item} from {merchant} is ready to order. "
+            f"Say 'usual' to reorder, or let me know what you need."
+        )
+    if orders > 0:
+        return (
+            f"Welcome back, {name}! "
+            f"You have {orders} order{'s' if orders > 1 else ''} with Nova. "
+            f"How can I help?"
+        )
+    return f"Hey {name}! I'm Nova, your in-car assistant. How can I help you today?"
+
+
+# ── Dataclasses ─────────────────────────────────────────────────────────────────────────────────
 @dataclass
 class ConversationTurn:
     role: str
@@ -113,8 +223,11 @@ class DialogueState:
     command_buffer: list = field(default_factory=list)
     is_speaking: bool = False
 
+    # Greeting flag – False until first message received
+    greeted: bool = False
 
-# ── Response builder ──────────────────────────────────────────────────────────
+
+# ── Response builder ─────────────────────────────────────────────────────────────────────────────
 def build_response(
     message: str,
     state: str,
@@ -127,7 +240,8 @@ def build_response(
     queued: bool = False,
     queue_position: int = None,
     buffered_response: dict = None,
-    session_warning: str = None
+    session_warning: str = None,
+    driver_name: str = None
 ) -> dict:
     return {
         "nova_says":           message,
@@ -142,11 +256,12 @@ def build_response(
         "queue_position":      queue_position,
         "buffered_response":   buffered_response,
         "session_warning":     session_warning,
+        "driver_name":         driver_name,
         "timestamp":           time.time()
     }
 
 
-# ── Required slots ────────────────────────────────────────────────────────────
+# ── Required slots ───────────────────────────────────────────────────────────────────────────────
 REQUIRED_SLOTS = {
     "navigation":      ["destination"],
     "communication":   ["contact"],
@@ -165,11 +280,11 @@ REQUIRED_SLOTS = {
 SLOT_QUESTIONS = {
     "destination": "Where would you like to go?",
     "contact":     "Who would you like to call or message?",
-    "component":   "Which component — AC, window, heater, or lights?",
+    "component":   "Which component – AC, window, heater, or lights?",
     "action":      "Should I turn it on or off?",
 }
 
-# ── Keyword groups ────────────────────────────────────────────────────────────
+# ── Keyword groups ───────────────────────────────────────────────────────────────────────────────
 EMERGENCY_KEYWORDS = ["emergency", "accident", "help me", "call 911", "call ambulance"]
 STOP_KEYWORDS      = ["stop", "cancel", "quit", "shut up", "nevermind", "never mind"]
 REPEAT_KEYWORDS    = ["repeat", "say that again", "say again", "what did you say"]
@@ -181,6 +296,8 @@ QUEUE_KEYWORDS     = ["what's in the queue", "what is in the queue",
 CONFIRM_YES        = ["yes", "yeah", "yep", "confirm", "proceed",
                       "ok", "okay", "sure", "do it", "correct"]
 CONFIRM_NO         = ["no", "nope", "cancel", "stop", "don't", "abort"]
+USUAL_KEYWORDS     = ["usual", "same as before", "same order", "my usual",
+                      "the usual", "repeat my order", "order again"]
 
 NUMBER_WORDS = {
     "zero":0,"one":1,"two":2,"three":3,"four":4,
@@ -189,14 +306,26 @@ NUMBER_WORDS = {
 }
 
 
-# ── Route handlers ────────────────────────────────────────────────────────────
+# ── Route handlers ───────────────────────────────────────────────────────────────────────────────
 def handle_vehicle_control(entities: dict) -> dict:
     component = entities.get("component", "system")
     action    = entities.get("action", "on")
+    friendly = {
+        ("ac", "on"):      "AC is on.",
+        ("ac", "off"):     "AC switched off.",
+        ("heater", "on"):  "Heater is on.",
+        ("heater", "off"): "Heater off.",
+        ("window", "on"):  "Windows open.",
+        ("window", "off"): "Windows closed.",
+        ("lights", "on"):  "Lights on.",
+        ("lights", "off"): "Lights off.",
+    }
+    msg = friendly.get((component.lower(), action.lower()),
+                       f"{component.upper()} is now {action}.")
     return build_response(
-        message=f"Done. {component.upper()} turned {action}.",
+        message=msg,
         state="IDLE", intent="vehicle_control",
-        routing="Direct hardware command via CAN bus — no AI, no cost, under 50ms",
+        routing="Direct hardware command via CAN bus – no AI, no cost, under 50ms",
         entities=entities, action="hardware_command"
     )
 
@@ -205,35 +334,36 @@ def handle_navigation(entities: dict) -> dict:
     eta_minutes = random.randint(10, 45)
     distance_km = round(random.uniform(5, 30), 1)
     return build_response(
-        message=f"Navigating to {destination}. Estimated {eta_minutes} minutes — {distance_km} km via fastest route.",
+        message=f"Navigating to {destination}. Estimated {eta_minutes} minutes, {distance_km} km via the fastest route.",
         state="IDLE", intent="navigation",
-        routing="Maps API call — HERE / Google Maps — no LLM needed",
+        routing="Maps API call – HERE / Google Maps – no LLM needed",
         entities=entities, action="maps_api_call"
     )
 
 def handle_media(entities: dict) -> dict:
     query = entities.get("query", "your music")
     return build_response(
-        message=f"Playing {query} on Spotify.",
+        message=f"Playing {query}.",
         state="IDLE", intent="media",
-        routing="Spotify API — direct call — no AI, no cost",
+        routing="Spotify API – direct call – no AI, no cost",
         entities=entities, action="spotify_api_call"
     )
 
-def handle_general_question(text: str, history: list) -> dict:
+def handle_general_question(text: str, history: list, driver_name: str = "there") -> dict:
+    """TODO: Replace with real OpenRouter LLM call when Senthil shares endpoint."""
     return build_response(
         message=f"Let me think about that... (LLM response streams here with {len(history)} turns of context)",
         state="IDLE", intent="general_question",
-        routing="LLM via OpenRouter — Mistral-7B — full conversation context attached",
+        routing="LLM via OpenRouter – Mistral-7B – full conversation context attached",
         entities={}, action="llm_call"
     )
 
 def handle_communication(entities: dict) -> dict:
     contact = entities.get("contact", "contact")
     return build_response(
-        message=f"Calling {contact} now.",
+        message=f"Calling {contact}.",
         state="IDLE", intent="communication",
-        routing="Phone API — direct call",
+        routing="Phone API – direct call",
         entities=entities, action="phone_call"
     )
 
@@ -246,7 +376,7 @@ def handle_order_flow(entities: dict, raw_text: str, dm_state) -> dict:
       3. CONFIRM_PENDING → yes → OTP → location check → payment
     """
 
-    # ── Merchant already listed — user is picking ─────────────────────────────
+    # ── Merchant already listed – user is picking ────────────────────────────────────────────────
     if dm_state.pending_entities.get("merchants"):
         merchants  = dm_state.pending_entities["merchants"]
         text_lower = raw_text.lower()
@@ -306,17 +436,17 @@ def handle_order_flow(entities: dict, raw_text: str, dm_state) -> dict:
 
         dm_state.fsm_state = "CONFIRM_PENDING"
         msg = (
-            f"{chosen['name']} — {item_name} ${item_price:.2f}. "
+            f"{chosen['name']} – {item_name} ${item_price:.2f}. "
             f"Total ${total:.2f} including ${nova_fee:.2f} Nova fee. "
             f"Say YES to confirm."
         )
         return build_response(
             message=msg, state="CONFIRM_PENDING",
-            intent="payment", routing="Merchant selected — basket ready",
+            intent="payment", routing="Merchant selected – basket ready",
             entities=dm_state.pending_entities, action="show_merchant_on_map"
         )
 
-    # ── Fresh search ──────────────────────────────────────────────────────────
+    # ── Fresh search ─────────────────────────────────────────────────────────────────────────────
     query = (entities.get("merchant") or entities.get("item") or
              entities.get("query") or raw_text)
 
@@ -360,7 +490,7 @@ def handle_order_flow(entities: dict, raw_text: str, dm_state) -> dict:
                 dm_state.fsm_state = "CONFIRM_PENDING"
                 return build_response(
                     message=result["nova_says"], state="CONFIRM_PENDING",
-                    intent="payment", routing="Single merchant — basket ready",
+                    intent="payment", routing="Single merchant – basket ready",
                     entities=dm_state.pending_entities, action="show_merchant_on_map"
                 )
 
@@ -369,7 +499,7 @@ def handle_order_flow(entities: dict, raw_text: str, dm_state) -> dict:
                 dm_state.fsm_state = "CONFIRM_PENDING"
                 return build_response(
                     message=result["nova_says"], state="CONFIRM_PENDING",
-                    intent="payment", routing="Multiple merchants — waiting for selection",
+                    intent="payment", routing="Multiple merchants – waiting for selection",
                     entities=dm_state.pending_entities
                 )
 
@@ -407,7 +537,7 @@ def _log_command(driver_id: str, command: str, intent: str, is_verified: bool):
         print(f"[audit] Log failed: {e}")
 
 
-# ── Main Dialogue Manager ─────────────────────────────────────────────────────
+# ── Main Dialogue Manager ────────────────────────────────────────────────────────────────────────
 class DialogueManager:
 
     def __init__(self):
@@ -419,17 +549,42 @@ class DialogueManager:
         self._paused_entities    = None
         self._last_nova_response = None
 
-    # ══════════════════════════════════════════════════════════════════════════
+        # ── Load driver profile on startup ──────────────────────────────────────────────────────
+        self._profile     = load_driver_profile(self._driver_id)
+        # driver name for messages – fallback to "there" if no profile
+        self._driver_name = (self._profile or {}).get("name", "there") or "there"
+
+        if self._profile:
+            save_profile_field(self._driver_id, "last_seen", time.strftime("%Y-%m-%d %H:%M"))
+            print(f"[Layer 7] Driver: {self._driver_name}")
+        else:
+            print("[Layer 7] Driver: Guest (not enrolled)")
+
+    # ╔══════════════════════════════════════════════════════════════════════════════════════════╗
+    # GREETING
+    # ╚══════════════════════════════════════════════════════════════════════════════════════════╝
+
+    def _get_greeting_response(self) -> dict:
+        """Return personalized greeting on very first interaction."""
+        greeting = get_greeting(self._profile, self._driver_id)
+        return self._store_response(build_response(
+            message=greeting,
+            state="IDLE", intent="greeting",
+            routing="Profile loaded – personalized greeting",
+            driver_name=self._driver_name
+        ))
+
+    # ╔══════════════════════════════════════════════════════════════════════════════════════════╗
     # BUFFER / QUEUE
-    # ══════════════════════════════════════════════════════════════════════════
+    # ╚══════════════════════════════════════════════════════════════════════════════════════════╝
 
     def speaking_started(self):
         self.state.is_speaking = True
-        print("[dialogue] Nova started speaking — buffer active")
+        print("[dialogue] Nova started speaking – buffer active")
 
     def speaking_done(self) -> Optional[dict]:
         self.state.is_speaking = False
-        print("[dialogue] Nova finished speaking — checking buffer...")
+        print("[dialogue] Nova finished speaking – checking buffer...")
         if self.state.command_buffer:
             next_cmd  = self.state.command_buffer.pop(0)
             wait_time = round(time.time() - next_cmd.received_at, 1)
@@ -439,7 +594,7 @@ class DialogueManager:
             if self.state.command_buffer:
                 response["nova_says"] += f" ({len(self.state.command_buffer)} more in queue)"
             return response
-        print("[dialogue] Buffer empty — returning to IDLE")
+        print("[dialogue] Buffer empty – returning to IDLE")
         return None
 
     def _push_to_buffer(self, text: str) -> dict:
@@ -447,15 +602,15 @@ class DialogueManager:
         self.state.command_buffer.append(QueuedCommand(text=text))
         print(f"[dialogue] Buffered: '{text}' at position {position}")
         return build_response(
-            message="Got it. I'll answer that next — finishing current response first.",
+            message="Got it. I'll answer that next – finishing current response first.",
             state="BUFFERED", intent="buffered",
             routing=f"Command buffered at position {position}",
             queued=True, queue_position=position
         )
 
-    # ══════════════════════════════════════════════════════════════════════════
+    # ╔══════════════════════════════════════════════════════════════════════════════════════════╗
     # SESSION
-    # ══════════════════════════════════════════════════════════════════════════
+    # ╚══════════════════════════════════════════════════════════════════════════════════════════╝
 
     def _is_session_valid(self) -> bool:
         if not self.state.session_valid or not self.state.session_token:
@@ -471,7 +626,7 @@ class DialogueManager:
         """Returns seconds remaining in session. 0 if expired."""
         if not self.state.session_start:
             return 0
-        elapsed = time.time() - self.state.session_start
+        elapsed   = time.time() - self.state.session_start
         remaining = int(self.state.session_duration - elapsed)
         return max(0, remaining)
 
@@ -536,6 +691,8 @@ class DialogueManager:
         warning = self._get_session_warning()
         if warning and not response.get("session_warning"):
             response["session_warning"] = warning
+        # Always attach driver_name so UI can show it
+        response["driver_name"] = self._driver_name
         return response
 
     def _check_location(self, entities: dict) -> dict:
@@ -544,9 +701,9 @@ class DialogueManager:
             return {"known": True, "confirmed": True}
         return {"known": False, "confirmed": False}
 
-    # ══════════════════════════════════════════════════════════════════════════
+    # ╔══════════════════════════════════════════════════════════════════════════════════════════╗
     # MAIN ENTRY POINT
-    # ══════════════════════════════════════════════════════════════════════════
+    # ╚══════════════════════════════════════════════════════════════════════════════════════════╝
 
     def process(self, user_input: str) -> dict:
         user_input = user_input.strip()
@@ -554,12 +711,18 @@ class DialogueManager:
             return build_response(message="I didn't catch that. Could you repeat?",
                                   state="IDLE", intent="unknown", routing="None")
 
-        # Lockout — absolute block
+        # ── First interaction → greet by name ─────────────────────────────────────────────────
+        if not self.state.greeted:
+            self.state.greeted = True
+            self._add_to_history("user", user_input, "greeting")
+            return self._get_greeting_response()
+
+        # Lockout – absolute block
         if self.state.locked_out:
             return build_response(
                 message="System is locked. All authentication attempts failed. Please contact support.",
                 state="LOCKED", intent="lockout",
-                routing="Full lockout — all 3 auth levels failed",
+                routing="Full lockout – all 3 auth levels failed",
                 verification_status="locked"
             )
 
@@ -572,7 +735,7 @@ class DialogueManager:
                 return build_response(
                     message="I already have several questions waiting. Please wait a moment.",
                     state="BUFFERED", intent="queue_full",
-                    routing=f"Buffer full — max {QUEUE_MAX} items"
+                    routing=f"Buffer full – max {QUEUE_MAX} items"
                 )
             return self._push_to_buffer(user_input)
 
@@ -582,7 +745,7 @@ class DialogueManager:
         self._check_context_decay()
         text_lower = user_input.lower().strip()
 
-        # ── Emergency ─────────────────────────────────────────────────────────
+        # ── Emergency ─────────────────────────────────────────────────────────────────────────
         if any(kw in text_lower for kw in EMERGENCY_KEYWORDS):
             self.state.is_speaking    = False
             self.state.command_buffer.clear()
@@ -591,13 +754,13 @@ class DialogueManager:
             self._otp_active          = None
             _log_command(self._driver_id, user_input, "emergency", self._is_session_valid())
             return self._store_response(build_response(
-                message="Emergency detected. Calling emergency services now. Alerting emergency contacts. Stay calm.",
+                message=f"Emergency detected, {self._driver_name}. Calling emergency services now. Alerting emergency contacts. Stay calm.",
                 state="IDLE", intent="emergency",
-                routing="Emergency — absolute highest priority — buffer cleared",
+                routing="Emergency – absolute highest priority – buffer cleared",
                 action="emergency_call"
             ))
 
-        # ── Stop ──────────────────────────────────────────────────────────────
+        # ── Stop ──────────────────────────────────────────────────────────────────────────────
         if any(kw in text_lower for kw in STOP_KEYWORDS):
             self.state.is_speaking    = False
             self.state.command_buffer.clear()
@@ -609,19 +772,19 @@ class DialogueManager:
             self.state.pin_attempts   = 0
             _log_command(self._driver_id, user_input, "stop", self._is_session_valid())
             return self._store_response(build_response(
-                message="Stopped. Buffer and queue cleared. Ready for commands.",
+                message="Understood. All tasks stopped. Ready for your next command.",
                 state="IDLE", intent="stop",
-                routing="Interrupt — immediate halt — buffer + queue flushed"
+                routing="Interrupt – immediate halt – buffer + queue flushed"
             ))
 
-        # ── Repeat ────────────────────────────────────────────────────────────
+        # ── Repeat ────────────────────────────────────────────────────────────────────────────
         if any(kw in text_lower for kw in REPEAT_KEYWORDS):
             msg = self._last_nova_response or "Nothing to repeat yet."
             return self._store_response(build_response(
                 message=msg, state="IDLE", intent="repeat", routing="Repeat last response"
             ))
 
-        # ── Pause ─────────────────────────────────────────────────────────────
+        # ── Pause ─────────────────────────────────────────────────────────────────────────────
         if any(kw in text_lower for kw in PAUSE_KEYWORDS):
             if self.state.current_intent:
                 self._paused_intent   = self.state.current_intent
@@ -629,14 +792,14 @@ class DialogueManager:
                 self.state.fsm_state  = "IDLE"
                 return self._store_response(build_response(
                     message=f"Paused. Saved your {self._paused_intent} request. Say resume when ready.",
-                    state="IDLE", intent="pause", routing="Paused — intent saved"
+                    state="IDLE", intent="pause", routing="Paused – intent saved"
                 ))
             return self._store_response(build_response(
-                message="Nothing active to pause.", state="IDLE",
+                message="No active request to pause.", state="IDLE",
                 intent="pause", routing="Nothing to pause"
             ))
 
-        # ── Resume ────────────────────────────────────────────────────────────
+        # ── Resume ────────────────────────────────────────────────────────────────────────────
         if any(kw in text_lower for kw in RESUME_KEYWORDS):
             if self._paused_intent:
                 restored_intent       = self._paused_intent
@@ -651,27 +814,27 @@ class DialogueManager:
                 response["resume_message"] = f"Resuming your {restored_intent} request."
                 return self._store_response(response)
             return self._store_response(build_response(
-                message="Nothing to resume.", state="IDLE",
+                message="No paused request found.", state="IDLE",
                 intent="resume", routing="No paused context"
             ))
 
-        # ── Help ──────────────────────────────────────────────────────────────
+        # ── Help ──────────────────────────────────────────────────────────────────────────────
         if any(kw in text_lower for kw in HELP_KEYWORDS):
             return self._store_response(build_response(
                 message=(
-                    "Here's what I can help with: "
-                    "Vehicle controls — AC, windows, lights. "
-                    "Navigation — directions and routes. "
-                    "Music — play, pause, skip. "
-                    "Calls and messages — hands free. "
-                    "Payments — order food, fuel, parking. "
-                    "General questions — weather, news, anything. "
+                    f"Here's what I can help with, {self._driver_name}: "
+                    "Vehicle controls – AC, windows, lights. "
+                    "Navigation – directions and routes. "
+                    "Music – play, pause, skip. "
+                    "Calls and messages – hands free. "
+                    "Payments – order food, fuel, parking. "
+                    "General questions – weather, news, anything. "
                     "Say stop to cancel. Say pause to hold. Say repeat to hear again."
                 ),
                 state="IDLE", intent="help", routing="Help message delivered"
             ))
 
-        # ── Queue status ──────────────────────────────────────────────────────
+        # ── Queue status ──────────────────────────────────────────────────────────────────────
         if any(kw in text_lower for kw in QUEUE_KEYWORDS):
             buf = self.state.command_buffer
             msg = ("Buffer is empty. Ready for your next command." if not buf else
@@ -682,7 +845,7 @@ class DialogueManager:
                 routing="Buffer status read aloud"
             ))
 
-        # ── FSM states ────────────────────────────────────────────────────────
+        # ── FSM states ────────────────────────────────────────────────────────────────────────
         if self.state.fsm_state == "SLOT_FILL":
             return self._store_response(self._handle_slot_fill(user_input))
 
@@ -698,7 +861,46 @@ class DialogueManager:
         if self.state.fsm_state == "LOCATION_CONFIRM":
             return self._store_response(self._handle_location_confirm(user_input))
 
-        # ── Normal flow ───────────────────────────────────────────────────────
+        # ── Usual order shortcut ────────────────────────────────────────────────────────────
+        if any(kw in text_lower for kw in USUAL_KEYWORDS):
+            last = (self._profile or {}).get("last_order")
+            if last and last.get("merchant_name") and last.get("item_name"):
+                merchant_name = last["merchant_name"]
+                item_name     = last["item_name"]
+                item_price    = last.get("item_price", 0.0)
+                nova_fee      = round(item_price * 0.03, 2)
+                total         = round(item_price + nova_fee, 2)
+                self.state.current_intent = "payment"
+                self.state.pending_entities = {
+                    "merchant_id":   last.get("merchant_id"),
+                    "merchant_name": merchant_name,
+                    "item_id":       last.get("item_id"),
+                    "item_name":     item_name,
+                    "item_price":    item_price,
+                    "total":         total,
+                    "nova_fee":      nova_fee,
+                    "subtotal":      item_price,
+                    "eta_order":     "8 min",
+                }
+                self.state.fsm_state = "CONFIRM_PENDING"
+                return self._store_response(build_response(
+                    message=(
+                        f"Your usual order: {item_name} from {merchant_name}, "
+                        f"${item_price:.2f}. Total ${total:.2f} including Nova fee. "
+                        f"Say YES to confirm."
+                    ),
+                    state="CONFIRM_PENDING", intent="payment",
+                    routing="Usual order shortcut – skipping merchant search",
+                    entities=self.state.pending_entities
+                ))
+            else:
+                return self._store_response(build_response(
+                    message="You don't have a usual order yet! What would you like to order?",
+                    state="IDLE", intent="payment",
+                    routing="No usual order found"
+                ))
+
+        # ── Normal flow ───────────────────────────────────────────────────────────────────────
         resolved_text = self._resolve_context(user_input)
         result        = self.classifier.classify(resolved_text)
         self._add_to_history("user", user_input, result.intent)
@@ -710,7 +912,7 @@ class DialogueManager:
             is_verified = self._is_session_valid()
         )
 
-        # Session check for payment — warn if expiring soon
+        # Session check for payment – warn if expiring soon
         if result.intent == "payment" and self._is_session_valid():
             warning = self._get_session_warning()
             if warning:
@@ -726,13 +928,13 @@ class DialogueManager:
             question = SLOT_QUESTIONS.get(missing[0], f"What is the {missing[0]}?")
             return self._store_response(build_response(
                 message=question, state="SLOT_FILL", intent=result.intent,
-                routing=f"Slot filling — missing: {missing}",
+                routing=f"Slot filling – missing: {missing}",
                 entities=result.entities
             ))
 
         return self._store_response(self._route(result))
 
-    # ── Route ─────────────────────────────────────────────────────────────────
+    # ── Route ─────────────────────────────────────────────────────────────────────────────────
     def _route(self, result: IntentResult) -> dict:
         if result.intent == "vehicle_control":
             return handle_vehicle_control(result.entities)
@@ -743,17 +945,17 @@ class DialogueManager:
         elif result.intent == "communication":
             return handle_communication(result.entities)
         elif result.intent == "general_question":
-            return handle_general_question(result.raw_text, self.state.history)
+            return handle_general_question(result.raw_text, self.state.history, self._driver_name)
         elif result.intent == "payment":
             self.state.current_intent   = "payment"
             self.state.pending_entities = result.entities
             return handle_order_flow(result.entities, result.raw_text, self.state)
         else:
-            return handle_general_question(result.raw_text, self.state.history)
+            return handle_general_question(result.raw_text, self.state.history, self._driver_name)
 
-    # ══════════════════════════════════════════════════════════════════════════
+    # ╔══════════════════════════════════════════════════════════════════════════════════════════╗
     # STATE HANDLERS
-    # ══════════════════════════════════════════════════════════════════════════
+    # ╚══════════════════════════════════════════════════════════════════════════════════════════╝
 
     def _handle_slot_fill(self, user_input: str) -> dict:
         self.state.slot_attempt += 1
@@ -774,7 +976,7 @@ class DialogueManager:
             return build_response(
                 message=question, state="SLOT_FILL",
                 intent=self.state.current_intent,
-                routing=f"Slot filling — still missing: {self.state.missing_slots}",
+                routing=f"Slot filling – still missing: {self.state.missing_slots}",
                 entities=self.state.pending_entities
             )
         self.state.fsm_state = "IDLE"
@@ -786,7 +988,7 @@ class DialogueManager:
         """CONFIRM_PENDING: merchant selection OR yes/no for order."""
         user_lower = user_input.lower().strip()
 
-        # Merchant list pending — this is a selection not yes/no
+        # Merchant list pending – this is a selection not yes/no
         if self.state.pending_entities.get("merchants"):
             return handle_order_flow({}, user_input, self.state)
 
@@ -796,9 +998,9 @@ class DialogueManager:
             otp = generate_otp()
             self._otp_active = otp
             return build_response(
-                message=f"Voice OTP: Please repeat — {otp_to_words(otp)}.",
+                message=f"Voice OTP: Please repeat – {otp_to_words(otp)}.",
                 state="OTP_PENDING", intent="payment",
-                routing="Voice OTP — unique per transaction",
+                routing="Voice OTP – unique per transaction",
                 otp=otp
             )
         elif any(w in user_lower for w in CONFIRM_NO):
@@ -836,7 +1038,7 @@ class DialogueManager:
                 return build_response(
                     message="OTP verified. GPS location is unfamiliar. Can you confirm you're at a safe location? Say YES to proceed.",
                     state="LOCATION_CONFIRM", intent="payment",
-                    routing="Location check — unknown GPS — driver confirmation needed"
+                    routing="Location check – unknown GPS – driver confirmation needed"
                 )
         else:
             self.state.otp_attempts += 1
@@ -849,7 +1051,7 @@ class DialogueManager:
                 return build_response(
                     message="OTP did not match. Please say your PIN to authorize payment instead.",
                     state="PIN_PAYMENT_PENDING", intent="payment",
-                    routing="OTP failed max attempts — PIN fallback",
+                    routing="OTP failed max attempts – PIN fallback",
                     action="otp_failed_pin_fallback"
                 )
 
@@ -863,7 +1065,7 @@ class DialogueManager:
             )
 
     def _handle_pin_for_payment(self, user_input: str) -> dict:
-        """PIN fallback — max PIN_MAX_ATTEMPTS then payment denied."""
+        """PIN fallback – max PIN_MAX_ATTEMPTS then payment denied."""
         self.state.pin_attempts += 1
         pin_input = user_input.strip()
 
@@ -887,9 +1089,9 @@ class DialogueManager:
             self.state.pin_attempts   = 0
             self.state.current_intent = None
             return build_response(
-                message="PIN verification failed. Payment denied. Please try again later.",
+                message=f"PIN verification failed, {self._driver_name}. Payment denied. Please try again later.",
                 state="IDLE", intent="payment",
-                routing="PIN fallback failed — payment denied",
+                routing="PIN fallback failed – payment denied",
                 action="payment_denied", verification_status="pin_failed"
             )
 
@@ -906,9 +1108,9 @@ class DialogueManager:
             return self._process_payment_final()
         self.state.fsm_state = "IDLE"
         return build_response(
-            message="Payment cancelled for safety. Location could not be confirmed.",
+            message="Payment cancelled. Location could not be verified.",
             state="IDLE", intent="payment",
-            routing="Location check failed — payment denied",
+            routing="Location check failed – payment denied",
             action="payment_denied"
         )
 
@@ -921,12 +1123,29 @@ class DialogueManager:
         if not self.state.session_start:
             self._start_session(f"web_session_{int(time.time())}")
 
+        # Update order count + save last order in profile
+        current_orders = (self._profile or {}).get("total_orders", 0)
+        new_orders = current_orders + 1
+        if self._profile is not None:
+            self._profile["total_orders"] = new_orders
+            save_profile_field(self._driver_id, "total_orders", new_orders)
+            # Save last order for "usual" feature
+            last_order = {
+                "merchant_id":   entities.get("merchant_id"),
+                "merchant_name": entities.get("merchant_name"),
+                "item_id":       entities.get("item_id"),
+                "item_name":     entities.get("item_name"),
+                "item_price":    entities.get("item_price"),
+            }
+            self._profile["last_order"] = last_order
+            save_profile_field(self._driver_id, "last_order", last_order)
+
         if COMMERCE_AVAILABLE and entities.get("basket_id"):
             result = process_payment(entities["basket_id"], entities)
             return build_response(
                 message=result["nova_says"],
                 state="IDLE", intent="payment",
-                routing="Nova Pay — Stripe test mode — transaction complete",
+                routing="Nova Pay – Stripe test mode – transaction complete",
                 action="payment_confirmed",
                 entities={
                     "order_id":         result["order_id"],
@@ -944,24 +1163,26 @@ class DialogueManager:
             )
 
         return build_response(
-            message="OTP verified. Order confirmed. $6.50 charged via Nova Pay. Ready in 8 minutes.",
+            message=f"OTP verified. Order confirmed, {self._driver_name}! $6.50 charged via Nova Pay. Ready in 8 minutes.",
             state="IDLE", intent="payment",
-            routing="Nova Pay — transaction complete",
+            routing="Nova Pay – transaction complete",
             action="payment_confirmed",
             entities={"transaction_id": "TXN-DEMO001", "nova_fee": 0.20}
         )
 
 
-# ── Quick test ────────────────────────────────────────────────────────────────
+# ── Quick test ───────────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     dm = DialogueManager()
 
     print("\n" + "="*60)
-    print("  NOVA Layer 7 — Test")
+    print("  NOVA Layer 7 – Test")
+    print(f"  Driver: {dm._driver_name}")
     print(f"  L3:{L3_AVAILABLE}  Commerce:{COMMERCE_AVAILABLE}  Audit:{AUDIT_AVAILABLE}")
     print("="*60)
 
     steps = [
+        ("hello nova",    "First message – greeting"),
         ("order a coffee", "Search"),
         ("Starbucks",      "Pick merchant"),
         ("yes",            "Confirm"),
@@ -984,4 +1205,4 @@ if __name__ == "__main__":
             e = otp_r.get("entities", {})
             if e.get("total"):
                 print(f"  Total : ${e['total']:.2f}  Fee: ${e['nova_fee']:.2f}")
-                print(f"  TXN   : {e.get('transaction_id', '—')}")
+                print(f"  TXN   : {e.get('transaction_id', '–')}")
