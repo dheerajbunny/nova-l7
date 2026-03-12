@@ -114,7 +114,60 @@ class DialogueState:
     # FIFO buffer
     command_buffer: list = field(default_factory=list)
     is_speaking: bool = False
+    greeted: bool = False
 
+
+
+# ── Profile path ──────────────────────────────────────────────────────────────
+import json
+import os
+PROFILES_PATH = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), '..', 'L-3', 'data', 'profiles.json')
+)
+
+def load_driver_profile(driver_id: str) -> dict:
+    try:
+        if os.path.exists(PROFILES_PATH):
+            with open(PROFILES_PATH, "r") as f:
+                profiles = json.load(f)
+            if driver_id in profiles:
+                print(f"[Layer 7] Profile loaded – name: {profiles[driver_id].get('name')}")
+                return profiles[driver_id]
+    except Exception as e:
+        print(f"[Layer 7] Could not load profile: {e}")
+    return None
+
+def save_profile_field(driver_id: str, key: str, value) -> None:
+    try:
+        profiles = {}
+        if os.path.exists(PROFILES_PATH):
+            with open(PROFILES_PATH, "r") as f:
+                profiles = json.load(f)
+        if driver_id not in profiles:
+            profiles[driver_id] = {}
+        profiles[driver_id][key] = value
+        os.makedirs(os.path.dirname(PROFILES_PATH), exist_ok=True)
+        with open(PROFILES_PATH, "w") as f:
+            json.dump(profiles, f, indent=2)
+    except Exception as e:
+        print(f"[Layer 7] Profile save error: {e}")
+
+def get_greeting(profile, driver_id: str = "driver1") -> str:
+    if profile is None:
+        return "Hey Guest! I'm Nova, your in-car assistant. How can I help you today?"
+    name   = (profile.get("name") or "").strip()
+    orders = profile.get("total_orders", 0)
+    if not name or name.lower() in ("there", "guest", ""):
+        label = driver_id.replace("driver", "Driver ").strip()
+        return f"Hey {label}! I'm Nova, your in-car assistant. How can I help you today?"
+    last_order = profile.get("last_order")
+    if orders > 0 and last_order:
+        merchant = last_order.get("merchant_name", "")
+        item     = last_order.get("item_name", "")
+        return f"Welcome back, {name}. Your usual {item} from {merchant} is ready to order. Say 'usual' to reorder, or let me know what you need."
+    if orders > 0:
+        return f"Welcome back, {name}! You have {orders} order{'s' if orders > 1 else ''} with Nova. How can I help?"
+    return f"Hey {name}! I'm Nova, your in-car assistant. How can I help you today?"
 
 # ── Response builder ──────────────────────────────────────────────────────────
 def build_response(
@@ -183,6 +236,7 @@ RESUME_KEYWORDS    = ["resume", "continue", "go ahead", "carry on"]
 HELP_KEYWORDS      = ["help", "what can you do", "what do you know", "commands"]
 QUEUE_KEYWORDS     = ["what's in the queue", "what is in the queue",
                       "how many requests", "what are you processing", "queue status"]
+USUAL_KEYWORDS     = ["usual", "same as before", "same order", "my usual", "the usual", "repeat my order", "order again"]
 CONFIRM_YES        = ["yes", "yeah", "yep", "confirm", "proceed",
                       "ok", "okay", "sure", "do it", "correct"]
 CONFIRM_NO         = ["no", "nope", "cancel", "stop", "don't", "abort"]
@@ -425,9 +479,29 @@ class DialogueManager:
         self._paused_entities    = None
         self._last_nova_response = None
 
+        self._profile     = load_driver_profile(self._driver_id)
+        self._driver_name = (self._profile or {}).get("name", "there") or "there"
+
+        if self._profile:
+            save_profile_field(self._driver_id, "last_seen", time.strftime("%Y-%m-%d %H:%M"))
+            print(f"[Layer 7] Driver: {self._driver_name}")
+        else:
+            self._driver_name = "Guest"
+
+
     # ══════════════════════════════════════════════════════════════════════════
     # BUFFER / QUEUE
     # ══════════════════════════════════════════════════════════════════════════
+
+    
+    def _get_greeting_response(self) -> dict:
+        greeting = get_greeting(self._profile, self._driver_id)
+        return self._store_response(build_response(
+            message=greeting,
+            state="IDLE", intent="greeting",
+            routing="Profile loaded – personalized greeting",
+            driver_name=self._driver_name
+        ))
 
     def speaking_started(self):
         self.state.is_speaking = True
@@ -552,6 +626,7 @@ class DialogueManager:
         warning = self._get_session_warning()
         if warning and not response.get("session_warning"):
             response["session_warning"] = warning
+        response["driver_name"] = self._driver_name
         return response
 
     def _check_location(self, entities: dict) -> dict:
@@ -572,6 +647,11 @@ class DialogueManager:
         if not user_input:
             return build_response(message="I didn't catch that. Could you repeat?",
                                   state="IDLE", intent="unknown", routing="None")
+
+        if not self.state.greeted:
+            self.state.greeted = True
+            self._add_to_history("user", user_input, "greeting")
+            return self._get_greeting_response()
 
         # Lockout — absolute block
         if self.state.locked_out:
@@ -732,6 +812,44 @@ class DialogueManager:
             return self._store_response(self._handle_location_confirm(user_input))
 
         # ── Normal flow ───────────────────────────────────────────────────────
+        
+        if any(kw in text_lower for kw in USUAL_KEYWORDS):
+            last = (self._profile or {}).get("last_order")
+            if last and last.get("merchant_name") and last.get("item_name"):
+                merchant_name = last["merchant_name"]
+                item_name     = last["item_name"]
+                item_price    = last.get("item_price", 0.0)
+                nova_fee      = round(item_price * 0.03, 2)
+                total         = round(item_price + nova_fee, 2)
+                self.state.current_intent = "payment"
+                self.state.pending_entities = {
+                    "merchant_id":   last.get("merchant_id"),
+                    "merchant_name": merchant_name,
+                    "item_id":       last.get("item_id"),
+                    "item_name":     item_name,
+                    "item_price":    item_price,
+                    "total":         total,
+                    "nova_fee":      nova_fee,
+                    "subtotal":      item_price,
+                    "eta_order":     "8 min",
+                }
+                self.state.fsm_state = "CONFIRM_PENDING"
+                return self._store_response(build_response(
+                    message=(
+                        f"Your usual order: {item_name} from {merchant_name}, "
+                        f"${item_price:.2f}. Total ${total:.2f} including Nova fee. "
+                        f"Say YES to confirm."
+                    ),
+                    state="CONFIRM_PENDING", intent="payment",
+                    routing="Usual order shortcut – skipping merchant search",
+                    entities=self.state.pending_entities
+                ))
+            else:
+                return self._store_response(build_response(
+                    message="You don't have a usual order yet! What would you like to order?",
+                    state="IDLE", intent="payment",
+                    routing="No usual order found"
+                ))
         resolved_text = self._resolve_context(user_input)
         result        = self.classifier.classify(resolved_text)
         self._add_to_history("user", user_input, result.intent)
@@ -1059,6 +1177,22 @@ class DialogueManager:
         # Start a simulated session when payment completes (tracks expiry)
         if not self.state.session_start:
             self._start_session(f"web_session_{int(time.time())}")
+
+        
+        current_orders = (self._profile or {}).get("total_orders", 0)
+        new_orders = current_orders + 1
+        if self._profile is not None:
+            self._profile["total_orders"] = new_orders
+            save_profile_field(self._driver_id, "total_orders", new_orders)
+            last_order = {
+                "merchant_id":   entities.get("merchant_id"),
+                "merchant_name": entities.get("merchant_name"),
+                "item_id":       entities.get("item_id"),
+                "item_name":     entities.get("item_name"),
+                "item_price":    entities.get("item_price"),
+            }
+            self._profile["last_order"] = last_order
+            save_profile_field(self._driver_id, "last_order", last_order)
 
         if COMMERCE_AVAILABLE and entities.get("basket_id"):
             result = process_payment(entities["basket_id"], entities)
